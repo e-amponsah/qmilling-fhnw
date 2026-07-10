@@ -287,8 +287,20 @@ def stage_classical(data: pd.DataFrame, selection: dict) -> dict:
     logger.info("Classical LOOCV results:\n%s", clf_table.to_string())
 
     pls_result = run_pls_regression_baseline(X, y_reg)
+    pls_table = pd.DataFrame([{
+        "model": "PLS_regression",
+        "features": ", ".join(selected_features),
+        "n_components": pls_result["metrics"]["n_components"],
+        "target": pls_result["metrics"]["target_scale"],
+        "q2_loocv": round(pls_result["metrics"]["q2_loocv"], 4),
+        "r2_train": round(pls_result["metrics"]["r2_train"], 4),
+        "patzmann_r2_benchmark": 0.82,
+        "patzmann_q2_benchmark": PATZMANN_Q2_BENCHMARK,
+        "n_folds": pls_result["metrics"]["n_folds"],
+    }])
+    save_results_table(pls_table, "pls_regression_loocv.csv")
     logger.info(
-        "PLS regression LOOCV: Q2=%.3f (Patzmann benchmark Q2=%.2f), R2(train)=%.3f",
+        "PLS regression LOOCV: Q2=%.3f (Patzmann benchmark Q2=%.2f), R2(train)=%.3f (Patzmann R2=0.82)",
         pls_result["metrics"]["q2_loocv"], PATZMANN_Q2_BENCHMARK, pls_result["metrics"]["r2_train"],
     )
     return clf_results

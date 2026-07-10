@@ -1,0 +1,2 @@
+model,features,n_components,target,q2_loocv,r2_train,patzmann_r2_benchmark,patzmann_q2_benchmark,n_folds
+PLS_regression,"Kappa3, D50, MolLogP, apparent_solubility",2,log(COMDR_15min),0.7563,0.8279,0.82,0.77,29

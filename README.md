@@ -129,7 +129,7 @@ order and produces the final unified comparison.
 |---|---|---|
 | `fetch` | PubChem REST lookup of all 29 SMILES (rate-limited ≥0.34s/request, RDKit-validated) | `data/raw/smiles_29_drugs.csv` |
 | `features` | Compute 14 RDKit descriptors, merge with experimental data, PCA diagnostic, fold-safe PCA-guided SelectKBest sweep (k=4..6) | `data/processed/modeling_table.csv`, `data/results/selected_features.csv`, `data/results/pca_loadings.csv`/`pca_scores.csv`, `plots/feature_correlation_heatmap.png`, `plots/pca/*` |
-| `classical` | ≥2 leakage-free classical baselines (SVC, RandomForest, GradientBoosting) + a PLS regression baseline for direct Pätzmann Q² comparison, all under 29-fold LOOCV | `data/results/classical_loocv.csv` |
+| `classical` | ≥2 leakage-free classical baselines (SVC, RandomForest, GradientBoosting) + a PLS regression baseline (on `log(COMDR_15min)`) for direct Pätzmann R²/Q² comparison, all under 29-fold LOOCV | `data/results/classical_loocv.csv`, `data/results/pls_regression_loocv.csv` |
 | `quantum` | Circuit diagrams, 3 kernel heatmaps + KTA scores, and the full 5-model quantum suite (QK-SVM×2, VQC, Data Re-uploading, QCNN) under 29-fold LOOCV | `data/results/quantum_loocv.csv`, `plots/circuits/*`, `plots/kernels/*`, `plots/scatter/score_vs_comdr.png` |
 | `bonus` | KTA-optimized ("trained") quantum kernel, ideal-vs-noisy/hardware degradation study, blind SMILES prediction demo | `data/results/execution_degradation.csv` |
 | `all` | Everything above + unified classical-vs-quantum comparison | `data/results/unified_comparison.csv`, `plots/unified_comparison.png` |
@@ -238,8 +238,15 @@ sweep.
 ### Classical baselines (`src/classical_models.py`)
 - **SVC (RBF kernel)**, calibrated via `CalibratedClassifierCV` for `predict_proba`.
 - **RandomForestClassifier**, **GradientBoostingClassifier**.
-- **PLS regression** on `COMDR_15min` (continuous target) for direct comparison against the
-  Pätzmann Q²=0.77 benchmark.
+- **PLS regression** for direct comparison against the Pätzmann R²=0.82 / Q²=0.77 benchmark,
+  saved to `data/results/pls_regression_loocv.csv`. Fit on **`log(COMDR_15min)`** by default
+  (`run_pls_regression_baseline(..., log_target=True)`), matching the benchmark table's target
+  row, which is literally labeled "LogCOMDR15min" — `COMDR_15min` spans a ~24x range (1.11-26.48)
+  and is heavily right-skewed, so a linear PLS fit on the *raw* ratio is dragged around by a
+  handful of extreme high-responder outliers (Fenofibrate at 26.48) and generalizes badly under
+  LOOCV with only 29 samples (Q²≈0.45, R²≈0.68). Log-transforming brings it to Q²≈0.76, R²≈0.83 —
+  in line with the published benchmark. Using `MANUAL_FEATURES=D50,MolLogP,Kappa3,apparent_solubility`
+  (the exact 4 Pätzmann variables) reproduces their result almost exactly.
 
 ### Quantum feature maps (`src/quantum_circuits.py`)
 - `angle_feature_map` — one `Ry(x_i)` per qubit + a single CNOT chain (the challenge's baseline

@@ -10,7 +10,7 @@ from rdkit import Chem
 from rdkit.Chem import Descriptors, rdMolDescriptors
 from rdkit.Chem.GraphDescriptors import BertzCT
 from rdkit.Chem.rdMolDescriptors import CalcChi0v, CalcChi1v, CalcKappa1, CalcKappa2, CalcKappa3
-from sklearn.feature_selection import SelectKBest, VarianceThreshold, f_classif
+from sklearn.feature_selection import VarianceThreshold, f_classif
 from sklearn.linear_model import LogisticRegression
 from sklearn.model_selection import LeaveOneOut
 from sklearn.preprocessing import MinMaxScaler
@@ -29,6 +29,7 @@ from src.config import (
     RANDOM_SEED,
     REGRESSION_TARGET,
 )
+from src.pca_analysis import get_pc_dominant_cluster, redundancy_aware_topk, run_pca
 
 logger = logging.getLogger(__name__)
 
@@ -87,14 +88,20 @@ def build_modeling_table(
         missing = set(dataset["drug"]) - set(descriptors["drug"])
         raise ValueError(f"Merge dropped rows; missing descriptors for: {missing}")
 
-    missing_patzmann = [c for c in PATZMANN_APPROX_COLS if c not in data.columns]
-    if missing_patzmann:
-        raise ValueError(f"Expected Patzmann-approximation columns missing: {missing_patzmann}")
-    logger.info(
-        "Note: Patzmann et al. reference variable(s) %s are not present in the "
-        "provided dataset; only %s are reproducible here.",
-        PATZMANN_MISSING_COLS, PATZMANN_APPROX_COLS,
-    )
+    missing_from_table = [c for c in PATZMANN_APPROX_COLS if c not in data.columns]
+    if missing_from_table:
+        raise ValueError(f"Expected Patzmann-approximation columns missing: {missing_from_table}")
+    if PATZMANN_MISSING_COLS:
+        logger.info(
+            "Note: Patzmann et al. reference variable(s) %s are not present in the "
+            "provided dataset; only %s are reproducible here.",
+            PATZMANN_MISSING_COLS, PATZMANN_APPROX_COLS,
+        )
+    else:
+        logger.info(
+            "All four Patzmann et al. reference variables are reproducible from the "
+            "provided data: %s.", PATZMANN_APPROX_COLS,
+        )
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
     data.to_csv(out_path, index=False)
@@ -103,7 +110,8 @@ def build_modeling_table(
 
 
 def get_candidate_matrix(data: pd.DataFrame) -> pd.DataFrame:
-    """Return the leakage-free candidate feature matrix X (14 descriptors + D50).
+    """Return the leakage-free candidate feature matrix X (14 RDKit descriptors
+    + D50 + apparent_solubility).
 
     Raises if any leakage column has somehow made it into the candidate pool.
     """
@@ -113,6 +121,24 @@ def get_candidate_matrix(data: pd.DataFrame) -> pd.DataFrame:
     return data[CANDIDATE_FEATURE_COLS].copy()
 
 
+def _pca_cluster_topk(X_arr: np.ndarray, y_arr: np.ndarray, feature_names: np.ndarray, k: int, n_top_pcs: int = 3) -> list[str]:
+    """Rank features by univariate f_classif score, but select via
+    `redundancy_aware_topk` against PCA-derived clusters fit on the SAME
+    data passed in (caller is responsible for that data being a training
+    fold only, to stay leakage-free) -- prefers one representative per
+    latent PCA axis over blindly taking the top-k individually-scoring
+    (and often mutually redundant) descriptors.
+    """
+    k_eff = min(k, X_arr.shape[1])
+    f_scores, _ = f_classif(X_arr, y_arr)
+    f_scores = np.nan_to_num(f_scores, nan=0.0)
+
+    _, _, loadings = run_pca(pd.DataFrame(X_arr, columns=feature_names))
+    clusters = get_pc_dominant_cluster(loadings, n_top_pcs=n_top_pcs)
+
+    return redundancy_aware_topk(f_scores, feature_names, clusters, k_eff)
+
+
 def select_k_best_features(
     X: pd.DataFrame,
     y: pd.Series,
@@ -120,13 +146,22 @@ def select_k_best_features(
     variance_threshold: float = 1e-6,
     random_state: int = RANDOM_SEED,
 ) -> dict:
-    """Fold-safe automated feature selection.
+    """Fold-safe, PCA-cluster-aware automated feature selection.
 
-    For each candidate k in `k_range`, runs a nested nested-LOOCV: inside every
-    outer training fold, a `VarianceThreshold` filter and `SelectKBest(f_classif)`
-    are fit *only* on that fold's training data, then used to score a simple
-    downstream classifier's held-out accuracy. This prevents the feature
-    selection step itself from leaking information about the held-out sample.
+    For each candidate k in `k_range`, runs a nested LOOCV: inside every
+    outer training fold, a `VarianceThreshold` filter, an `f_classif`
+    univariate score, and a PCA fit (for redundancy clustering, see
+    `pca_analysis.py`) are all computed *only* on that fold's training data,
+    then used to score a simple downstream classifier's held-out accuracy.
+    This prevents both the feature selection step AND its PCA-based
+    redundancy guard from leaking information about the held-out sample.
+
+    Selection prefers at most one feature per PCA-identified redundancy
+    cluster (e.g. the "size" cluster -- MolWt, Chi0v, Chi1v, Kappa1-3,
+    BertzCT -- collapses onto one latent axis; taking 4 of them adds far
+    less independent signal than picking 1 of them plus 3 unrelated
+    descriptors) before falling back to raw univariate score once every
+    cluster has contributed one feature.
 
     Returns a dict with the best k, the score table for every k, and the
     final feature subset chosen by fitting selection once on the *full*
@@ -148,12 +183,12 @@ def select_k_best_features(
             vt = VarianceThreshold(threshold=variance_threshold)
             X_train_vt = vt.fit_transform(X_train)
             X_test_vt = vt.transform(X_test)
-            kept = vt.get_support()
+            kept_names_fold = feature_names[vt.get_support()]
 
-            k_eff = min(k, X_train_vt.shape[1])
-            skb = SelectKBest(score_func=f_classif, k=k_eff)
-            X_train_sel = skb.fit_transform(X_train_vt, y_train)
-            X_test_sel = skb.transform(X_test_vt)
+            selected = _pca_cluster_topk(X_train_vt, y_train, kept_names_fold, k)
+            col_idx = [list(kept_names_fold).index(f) for f in selected]
+            X_train_sel = X_train_vt[:, col_idx]
+            X_test_sel = X_test_vt[:, col_idx]
 
             scaler = MinMaxScaler(feature_range=(0.0, 1.0))
             X_train_scaled = scaler.fit_transform(X_train_sel)
@@ -172,17 +207,14 @@ def select_k_best_features(
     # feature names only (and to hand fixed-qubit-count models, e.g. the
     # 6-qubit QCNN, an exact-k subset even when it isn't the LOOCV-optimal
     # k). Any actual model evaluation must redo selection per-fold (see
-    # `select_k_best_features`'s own nested-LOOCV above) to stay leakage-free.
+    # the nested-LOOCV above) to stay leakage-free.
     vt = VarianceThreshold(threshold=variance_threshold)
     X_vt = vt.fit_transform(X_arr)
     kept_names = feature_names[vt.get_support()]
 
     features_by_k = {}
     for k in range(k_range[0], k_range[1] + 1):
-        k_eff = min(k, X_vt.shape[1])
-        skb = SelectKBest(score_func=f_classif, k=k_eff)
-        skb.fit(X_vt, y_arr)
-        features_by_k[k] = kept_names[skb.get_support()].tolist()
+        features_by_k[k] = _pca_cluster_topk(X_vt, y_arr, kept_names, k)
 
     return {
         "best_k": best_k,
@@ -190,6 +222,57 @@ def select_k_best_features(
         "selected_features": features_by_k[best_k],
         "features_by_k": features_by_k,
     }
+
+
+def get_modeling_features(
+    X: pd.DataFrame, y: pd.Series, k_range: tuple[int, int] = FEATURE_SELECT_K_RANGE, **kwargs
+) -> dict:
+    """Feature-selection entry point used by main.py / notebooks.
+
+    Honors a manual `MANUAL_FEATURES` override (set in `.env`, see
+    `src/config.py`) when present -- e.g. after eyeballing
+    `plots/feature_correlation_heatmap.png` and picking your own columns --
+    otherwise falls back to the automated fold-safe `select_k_best_features`
+    sweep. Always returns the same shape (`source`, `best_k`, `scores_by_k`,
+    `selected_features`, `features_by_k`) so callers never need to branch on
+    which path was taken.
+
+    `features_by_k[6]` is always populated, falling back to an automated
+    6-best selection if the manual list isn't exactly 6 features, since the
+    fixed 6-qubit QCNN needs an exact 6-feature subset regardless of how the
+    other models' features were chosen.
+    """
+    from src.config import MANUAL_FEATURES
+
+    if MANUAL_FEATURES:
+        invalid = [f for f in MANUAL_FEATURES if f not in X.columns]
+        if invalid:
+            raise ValueError(
+                f"MANUAL_FEATURES (.env) contains unknown column(s): {invalid}. "
+                f"Valid candidates are: {list(X.columns)}"
+            )
+        logger.info("Using manual feature override from .env: %s", MANUAL_FEATURES)
+
+        features_by_k = {len(MANUAL_FEATURES): list(MANUAL_FEATURES)}
+        if len(MANUAL_FEATURES) != 6:
+            logger.info(
+                "MANUAL_FEATURES has %d feature(s), not 6 -- the fixed 6-qubit "
+                "QCNN will fall back to an automated 6-best selection instead.",
+                len(MANUAL_FEATURES),
+            )
+            features_by_k[6] = select_k_best_features(X, y, k_range=(6, 6))["features_by_k"][6]
+
+        return {
+            "source": "manual",
+            "best_k": len(MANUAL_FEATURES),
+            "scores_by_k": {},
+            "selected_features": list(MANUAL_FEATURES),
+            "features_by_k": features_by_k,
+        }
+
+    result = select_k_best_features(X, y, k_range=k_range, **kwargs)
+    result["source"] = "automated"
+    return result
 
 
 def compute_feature_correlations(data: pd.DataFrame, target_col: str = REGRESSION_TARGET) -> pd.Series:

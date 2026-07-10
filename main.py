@@ -54,8 +54,9 @@ from src.features import (
     build_modeling_table,
     compute_feature_correlations,
     get_candidate_matrix,
-    select_k_best_features,
+    get_modeling_features,
 )
+from src.pca_analysis import get_pc_dominant_cluster, run_pca
 from src.quantum_backend import ExecutionConfig, QuantumExecutor
 from src.quantum_circuits import build_vqc_circuit, reuploading_layer
 from src.quantum_models import (
@@ -77,6 +78,157 @@ logger = logging.getLogger(__name__)
 BACKEND_MODE_MAP = {"aer": "aer_simulator", "aer-noisy": "aer_noisy", "ibm-runtime": "ibm_runtime"}
 
 
+# --- Plotting helpers ---------------------------------------------------------
+
+def plot_feature_correlation_heatmap(X_full: pd.DataFrame, data: pd.DataFrame) -> None:
+    """Professional, annotated Pearson-correlation heatmap: the full square
+    matrix (every cell, both triangles), diverging colormap centered at 0,
+    per-cell values, and a colorbar.
+    """
+    corr_matrix = pd.concat([X_full, data[[REGRESSION_TARGET]]], axis=1).corr()
+
+    n = len(corr_matrix)
+    fig, ax = plt.subplots(figsize=(max(10, n * 0.85), max(8.5, n * 0.75)))
+    sns.heatmap(
+        corr_matrix,
+        cmap="RdBu_r",
+        vmin=-1, vmax=1, center=0,
+        annot=True, fmt=".2f", annot_kws={"size": 8},
+        linewidths=0.6, linecolor="white",
+        square=True, ax=ax,
+        cbar_kws={"label": "Pearson correlation (r)", "shrink": 0.8},
+    )
+    ax.set_title(
+        "Feature Correlation Matrix\n14 RDKit descriptors + D50 + apparent_solubility + COMDR_15min (target)",
+        fontsize=13, fontweight="bold", pad=14,
+    )
+    ax.set_xticklabels(ax.get_xticklabels(), rotation=45, ha="right", fontsize=9)
+    ax.set_yticklabels(ax.get_yticklabels(), rotation=0, fontsize=9)
+
+    # Make the target row/column's tick labels visually distinct (bold).
+    for label in ax.get_xticklabels() + ax.get_yticklabels():
+        if label.get_text() == REGRESSION_TARGET:
+            label.set_fontweight("bold")
+
+    # Per-cell contrast-aware annotation color (white on dark fills, black on
+    # light) -- seaborn always draws annotations in one fixed color otherwise,
+    # which reads poorly at the dark end of a diverging colormap.
+    cmap = plt.get_cmap("RdBu_r")
+    norm = plt.Normalize(vmin=-1, vmax=1)
+    for text, value in zip(ax.texts, corr_matrix.values.flatten()):
+        r, g, b, _ = cmap(norm(value))
+        luminance = 0.299 * r + 0.587 * g + 0.114 * b
+        text.set_color("white" if luminance < 0.55 else "black")
+
+    fig.tight_layout()
+    fig.savefig(PLOTS_DIR / "feature_correlation_heatmap.png", dpi=200, bbox_inches="tight")
+    plt.close(fig)
+
+
+def plot_pca_diagnostics(X_full: pd.DataFrame, data: pd.DataFrame) -> tuple:
+    """PCA diagnostic suite (Task 1 supplement; see src/pca_analysis.py for
+    why PCA is a diagnostic here, not a feature-reduction step): a scree
+    plot, a PC1-PC2 scatter colored by Responder/Non-Responder, a loadings
+    biplot, and each PC's correlation with the continuous target. Returns
+    (pca, scores, loadings) so the caller can also persist the numeric
+    tables and log the redundancy-cluster summary that guides
+    `features.select_k_best_features`.
+    """
+    pca, scores, loadings = run_pca(X_full)
+    pca_dir = PLOTS_DIR / "pca"
+
+    ev = pca.explained_variance_ratio_ * 100
+    cum = np.cumsum(ev)
+    n80 = int(np.argmax(cum >= 80) + 1)
+    n95 = int(np.argmax(cum >= 95) + 1)
+
+    # 1. Scree: per-PC variance (bars) + cumulative (line).
+    k = np.arange(1, len(ev) + 1)
+    fig, ax1 = plt.subplots(figsize=(7, 4))
+    ax1.bar(k, ev, color="#2471a3", alpha=0.85, label="per-PC variance")
+    ax1.set_xlabel("Principal component")
+    ax1.set_ylabel("Variance explained (%)")
+    ax1.set_xticks(k)
+    ax2 = ax1.twinx()
+    ax2.plot(k, cum, "o-", color="#c0392b", lw=2, label="cumulative")
+    ax2.axhline(80, color="grey", ls="--", lw=1)
+    ax2.set_ylabel("Cumulative variance (%)")
+    ax2.set_ylim(0, 105)
+    ax1.set_title(f"PCA scree: {n80} PC(s) cover 80% variance, {n95} cover 95%")
+    fig.tight_layout()
+    fig.savefig(pca_dir / "pca_scree.png", dpi=150)
+    plt.close(fig)
+
+    # 2. PC1-PC2 scatter: responder/non-responder, marker size ~ COMDR_15min.
+    resp = data[CLASSIFICATION_TARGET].values == 1
+    target = data[REGRESSION_TARGET].values
+    fig, ax = plt.subplots(figsize=(7.2, 6))
+    sizes = 30 + 8 * np.clip(target, None, 15)
+    ax.scatter(scores[~resp, 0], scores[~resp, 1], s=sizes[~resp], c="#c0392b",
+               edgecolor="k", lw=0.5, alpha=0.85, label="non-responder")
+    ax.scatter(scores[resp, 0], scores[resp, 1], s=sizes[resp], c="#2471a3",
+               edgecolor="k", lw=0.5, alpha=0.85, label="responder")
+    for i in np.argsort(-target)[:4]:
+        ax.annotate(data["drug"].iloc[i], (scores[i, 0], scores[i, 1]),
+                    fontsize=8, xytext=(4, 4), textcoords="offset points")
+    ax.axhline(0, color="k", lw=0.4)
+    ax.axvline(0, color="k", lw=0.4)
+    ax.set_xlabel(f"PC1 ({ev[0]:.1f}% variance)")
+    ax.set_ylabel(f"PC2 ({ev[1]:.1f}% variance)")
+    ax.set_title("Drugs in PC1-PC2 space (marker size ~ COMDR_15min)")
+    ax.legend(loc="best", fontsize=9)
+    fig.tight_layout()
+    fig.savefig(pca_dir / "pca_scatter.png", dpi=150)
+    plt.close(fig)
+
+    # 3. Biplot: feature-loading arrows + drug scores, both on PC1-PC2.
+    fig, ax = plt.subplots(figsize=(8, 7))
+    sc = scores[:, :2] / np.max(np.abs(scores[:, :2]))
+    ld = loadings[["PC1", "PC2"]].values
+    ld = ld / np.max(np.abs(ld)) * 0.9
+    ax.scatter(sc[~resp, 0], sc[~resp, 1], s=45, c="#c0392b", alpha=0.7, edgecolor="k", lw=0.4, label="non-responder")
+    ax.scatter(sc[resp, 0], sc[resp, 1], s=45, c="#2471a3", alpha=0.7, edgecolor="k", lw=0.4, label="responder")
+    for i, feat in enumerate(loadings.index):
+        ax.arrow(0, 0, ld[i, 0], ld[i, 1], color="k", alpha=0.6, head_width=0.02, length_includes_head=True)
+        ax.text(ld[i, 0] * 1.12, ld[i, 1] * 1.12, feat, fontsize=8, ha="center", va="center", color="k",
+                bbox=dict(boxstyle="round,pad=0.15", fc="white", ec="none", alpha=0.7))
+    ax.axhline(0, color="k", lw=0.4)
+    ax.axvline(0, color="k", lw=0.4)
+    ax.set_xlim(-1.15, 1.15)
+    ax.set_ylim(-1.15, 1.15)
+    ax.set_xlabel(f"PC1 ({ev[0]:.1f}%)")
+    ax.set_ylabel(f"PC2 ({ev[1]:.1f}%)")
+    ax.set_title("Biplot: feature loadings (arrows) + drug scores (dots)")
+    ax.legend(loc="best", fontsize=9)
+    fig.tight_layout()
+    fig.savefig(pca_dir / "pca_biplot.png", dpi=150)
+    plt.close(fig)
+
+    # 4. Per-PC correlation with the continuous target (Pearson + Spearman).
+    npcs = min(6, scores.shape[1])
+    corrs_p = [np.corrcoef(scores[:, kk], target)[0, 1] for kk in range(npcs)]
+    corrs_s = [pd.Series(scores[:, kk]).corr(pd.Series(target), method="spearman") for kk in range(npcs)]
+    fig, ax = plt.subplots(figsize=(7, 4))
+    x = np.arange(npcs)
+    ax.bar(x - 0.2, corrs_p, width=0.4, color="#2471a3", label="Pearson")
+    ax.bar(x + 0.2, corrs_s, width=0.4, color="#c0392b", label="Spearman")
+    for kk in range(npcs):
+        ax.text(kk, max(corrs_p[kk], corrs_s[kk]) + 0.02, f"{ev[kk]:.0f}%", ha="center", fontsize=8, color="grey")
+    ax.axhline(0, color="k", lw=0.4)
+    ax.set_xticks(x)
+    ax.set_xticklabels([f"PC{i + 1}" for i in range(npcs)])
+    ax.set_ylabel("correlation with COMDR_15min")
+    ax.set_ylim(-1, 1)
+    ax.set_title("Are the top PCs predictive? (grey label = variance explained)")
+    ax.legend(loc="best", fontsize=9)
+    fig.tight_layout()
+    fig.savefig(pca_dir / "pca_target_corr.png", dpi=150)
+    plt.close(fig)
+
+    logger.info("Saved 4 PCA diagnostic plots to %s (%d PC(s) cover 80%% variance, %d cover 95%%)", pca_dir, n80, n95)
+    return pca, scores, loadings
+
+
 # --- Stage 1: data + features ------------------------------------------------
 
 def stage_features() -> tuple[pd.DataFrame, dict]:
@@ -93,16 +245,27 @@ def stage_features() -> tuple[pd.DataFrame, dict]:
     corr = compute_feature_correlations(data)
     logger.info("Top correlations with COMDR_15min:\n%s", corr.to_string())
 
-    fig, ax = plt.subplots(figsize=(8, 6))
-    corr_matrix = pd.concat([X_full, data[[REGRESSION_TARGET]]], axis=1).corr()
-    sns.heatmap(corr_matrix, cmap="RdBu_r", center=0, annot=False, ax=ax)
-    ax.set_title("Feature correlation heatmap (14 RDKit descriptors + D50 + COMDR_15min)")
-    fig.tight_layout()
-    fig.savefig(PLOTS_DIR / "feature_correlation_heatmap.png", dpi=150)
-    plt.close(fig)
+    plot_feature_correlation_heatmap(X_full, data)
 
-    selection = select_k_best_features(X_full, y_clf)
-    logger.info("Feature selection: best_k=%d, scores_by_k=%s", selection["best_k"], selection["scores_by_k"])
+    pca, pca_scores, pca_loadings = plot_pca_diagnostics(X_full, data)
+    pca_loadings.round(4).to_csv(RESULTS_DIR / "pca_loadings.csv")
+    pd.DataFrame(
+        pca_scores, columns=pca_loadings.columns, index=data["drug"]
+    ).round(4).to_csv(RESULTS_DIR / "pca_scores.csv")
+    clusters = get_pc_dominant_cluster(pca_loadings)
+    cluster_groups: dict[int, list[str]] = {}
+    for feat, pc in clusters.items():
+        cluster_groups.setdefault(pc, []).append(feat)
+    logger.info(
+        "PCA redundancy clusters (features sharing a dominant PC among the top 3): %s",
+        {f"PC{pc + 1}": feats for pc, feats in sorted(cluster_groups.items())},
+    )
+
+    selection = get_modeling_features(X_full, y_clf)
+    logger.info(
+        "Feature selection (source=%s): best_k=%d, scores_by_k=%s",
+        selection["source"], selection["best_k"], selection["scores_by_k"],
+    )
     logger.info("Selected features: %s", selection["selected_features"])
     logger.info("6-feature subset (for the fixed 6-qubit QCNN): %s", selection["features_by_k"][6])
 

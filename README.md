@@ -68,6 +68,7 @@ exact-statevector shortcut, by design (see the top of this file).
 ├── plots/
 │   ├── circuits/               # Circuit diagrams for every feature map / ansatz / QCNN
 │   ├── kernels/                 # 29x29 quantum kernel heatmaps, per feature map
+│   ├── pca/                      # Scree, PC1-PC2 scatter, biplot, PC-vs-target correlation
 │   ├── scatter/                  # Per-drug predicted score vs. true COMDR_15min
 │   ├── feature_correlation_heatmap.png
 │   └── unified_comparison.png     # Classical vs. quantum LOOCV accuracy bar chart
@@ -77,7 +78,8 @@ exact-statevector shortcut, by design (see the top of this file).
 ├── src/
 │   ├── config.py              # Paths, column contracts, constants -- single source of truth
 │   ├── data_fetching.py        # PubChem REST SMILES lookup, rate-limited & fault-tolerant
-│   ├── features.py              # RDKit descriptors + fold-safe k-best feature selection
+│   ├── features.py              # RDKit descriptors + fold-safe, PCA-guided k-best selection
+│   ├── pca_analysis.py           # PCA diagnostic + redundancy-cluster detection
 │   ├── quantum_circuits.py       # Circuit *layouts*: angle/entangled/ZZ feature maps, VQC ansatz
 │   ├── quantum_backend.py         # Real execution layer: local Aer <-> IBM Runtime toggle
 │   ├── quantum_models.py           # Executable classes: QK-SVM, VQC, Data Re-upload, QCNN
@@ -108,12 +110,13 @@ Non-Responder. **13 of 29 drugs are Responders.**
 **Critical leakage rule** (enforced in `src/config.py::LEAKAGE_COLS` and asserted in
 `src/features.py::get_candidate_matrix`): `COM_15min` and `PM_15min` mathematically define the
 target and must never appear in the feature matrix `X`. The candidate feature pool is strictly
-the 14 RDKit descriptors + the experimental particle size `D50` (15 columns total).
+the 14 RDKit descriptors + the two experimental columns `D50` (particle size) and
+`apparent_solubility` (Sapp, apparent solubility in FaSSIF) — 16 columns total.
 
-Pätzmann et al.'s own model used 4 variables: `D50`, `logD6.5`, `κ3`, `Sapp`. **`Sapp` (apparent
-solubility in FaSSIF) is not present in the provided `hackathon_dataset_15min.csv`** — only
-`D50`, `MolLogP` (≈ logD6.5), and `Kappa3` are reproducible here. `src/features.py` logs this
-explicitly rather than silently approximating it.
+Pätzmann et al.'s own model used 4 variables: `D50`, `logD6.5`, `κ3`, `Sapp`. All four are
+reproducible from the provided data: `D50` and `apparent_solubility` (Sapp) directly, `Kappa3`
+directly as an RDKit topological descriptor, and `MolLogP` as the standard approximation for
+`logD6.5` (RDKit doesn't compute a pH-dependent logD).
 
 ---
 
@@ -125,17 +128,67 @@ order and produces the final unified comparison.
 | Stage | What it does | Key output |
 |---|---|---|
 | `fetch` | PubChem REST lookup of all 29 SMILES (rate-limited ≥0.34s/request, RDKit-validated) | `data/raw/smiles_29_drugs.csv` |
-| `features` | Compute 14 RDKit descriptors, merge with experimental data, fold-safe SelectKBest sweep (k=4..6) | `data/processed/modeling_table.csv`, `data/results/selected_features.csv`, `plots/feature_correlation_heatmap.png` |
+| `features` | Compute 14 RDKit descriptors, merge with experimental data, PCA diagnostic, fold-safe PCA-guided SelectKBest sweep (k=4..6) | `data/processed/modeling_table.csv`, `data/results/selected_features.csv`, `data/results/pca_loadings.csv`/`pca_scores.csv`, `plots/feature_correlation_heatmap.png`, `plots/pca/*` |
 | `classical` | ≥2 leakage-free classical baselines (SVC, RandomForest, GradientBoosting) + a PLS regression baseline for direct Pätzmann Q² comparison, all under 29-fold LOOCV | `data/results/classical_loocv.csv` |
 | `quantum` | Circuit diagrams, 3 kernel heatmaps + KTA scores, and the full 5-model quantum suite (QK-SVM×2, VQC, Data Re-uploading, QCNN) under 29-fold LOOCV | `data/results/quantum_loocv.csv`, `plots/circuits/*`, `plots/kernels/*`, `plots/scatter/score_vs_comdr.png` |
 | `bonus` | KTA-optimized ("trained") quantum kernel, ideal-vs-noisy/hardware degradation study, blind SMILES prediction demo | `data/results/execution_degradation.csv` |
 | `all` | Everything above + unified classical-vs-quantum comparison | `data/results/unified_comparison.csv`, `plots/unified_comparison.png` |
 
-Feature selection picks **4 features** (`Kappa1, Kappa2, Kappa3, Chi0v`) as LOOCV-optimal for
-the 4-6-qubit models. The QCNN is architecturally fixed at 6 qubits (per the challenge spec), so
-it runs on its own dedicated 6-feature subset (`MolWt, Kappa1, Kappa2, Kappa3, Chi0v, Chi1v`)
-rather than whichever k the automated selector found optimal for the other models — see
-`main.py::stage_quantum`.
+The QCNN is architecturally fixed at 6 qubits (per the challenge spec), so it always runs on its
+own dedicated 6-feature subset rather than whichever k the automated selector found optimal for
+the other models — see `main.py::stage_quantum`.
+
+### PCA diagnostic & redundancy-aware feature selection
+
+`src/pca_analysis.py` runs PCA on the full 16-column candidate pool as a **diagnostic**, not a
+feature-reduction step — every model still trains on physically-interpretable RDKit descriptors,
+never abstract PCA components. On this dataset, PC1 alone explains ~60% of variance (4 PCs are
+needed to cover 80%, 7 for 95%): `MolWt`, `Chi0v`, `Chi1v`, `Kappa1-3`, `BertzCT`, `TPSA`,
+`NumHAcceptors/Donors`, `NumRotatableBonds`, `RingCount`, and `apparent_solubility` all load
+heavily onto it — they're mostly measuring the same latent "molecular size/shape" axis (see
+`plots/pca/pca_biplot.png`, where those arrows all point the same direction). `MolLogP` and
+`FractionCSP3` share PC2. `D50` turns out to be entirely alone on PC3 — the only feature that's
+an independent experimental particle-size measurement rather than derived from molecular
+structure or solubility — which explains why it correlates strongest with the target yet is easy
+for a naive selector to overlook.
+
+`select_k_best_features` uses this: instead of blindly taking the top-k individually-scoring
+(`f_classif`) features, it takes at most **one representative per PCA-identified cluster** first,
+falling back to raw score only once every cluster has contributed a feature
+(`pca_analysis.redundancy_aware_topk`). On this dataset that took the nested-LOOCV selection
+score from ~0.69 to ~0.86 and pulled `D50` into the selected set — plain top-k `SelectKBest` had
+been picking 3-4 mutually-redundant size-cluster descriptors instead. Both the nested-LOOCV
+scoring loop *and* the final full-dataset selection use PCA fit strictly within their own
+training data, so this redundancy guard never leaks the held-out sample either.
+
+Deliverables: `plots/pca/pca_scree.png` (variance per PC + cumulative), `pca_scatter.png`
+(drugs in PC1-PC2 space, colored by Responder/Non-Responder), `pca_biplot.png` (loading arrows +
+drug scores together), `pca_target_corr.png` (each PC's correlation with `COMDR_15min`), plus
+`data/results/pca_loadings.csv` / `pca_scores.csv` for the full numeric tables.
+
+### Manual feature override
+
+`selected_features.csv` is chosen by an *automated* statistical filter (fold-safe
+`SelectKBest(f_classif)` against the binary label) — it is **not** the same thing as "the
+features most correlated with `COMDR_15min`" shown in `plots/feature_correlation_heatmap.png`
+(that heatmap correlates against the *continuous* target and is purely for visual inspection).
+The two can disagree — e.g. `D50` has by far the strongest correlation with `COMDR_15min` (0.81)
+but isn't picked by the classification-oriented automated filter.
+
+If you've inspected the heatmap yourself and want the pipeline to use your own hand-picked
+columns for every model instead, set `MANUAL_FEATURES` in `.env` (comma-separated, must be a
+subset of `src/config.py::CANDIDATE_FEATURE_COLS` — the 14 RDKit descriptors + `D50`):
+
+```bash
+# .env
+MANUAL_FEATURES=D50,MolLogP,Kappa3,TPSA
+```
+
+This bypasses `select_k_best_features` entirely (`src/features.py::get_modeling_features` is the
+single entry point every stage calls, and it checks `MANUAL_FEATURES` first). If your manual list
+isn't exactly 6 features, the fixed 6-qubit QCNN automatically falls back to its own automated
+6-best subset — logged explicitly — since it structurally cannot accept any other qubit count.
+Leave `MANUAL_FEATURES` empty/unset to keep the automated selection.
 
 ---
 
@@ -282,8 +335,6 @@ the backend can be switched the same way as the CLI's `--backend` flag.
 
 ## Known limitations & deliberate scope choices
 
-- **`Sapp` is unavailable**: only 3 of Pätzmann et al.'s 4 reference variables can be reproduced
-  from the provided dataset (see [above](#the-problem-in-brief)).
 - **Reduced optimizer iteration budgets for real execution**: VQC/Data-Reuploading default to
   `maxiter=60`, QCNN to `maxiter=80` (COBYLA) — tuned down from what would be affordable under an
   exact-statevector simulation, because every iteration is now a real, shot-sampled Sampler job.

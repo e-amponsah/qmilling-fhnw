@@ -16,7 +16,7 @@ from sklearn.model_selection import StratifiedKFold
 from sklearn.preprocessing import MinMaxScaler
 from sklearn.svm import SVC
 
-from src.config import RANDOM_SEED
+from src.config import EXPERIMENTAL_FEATURE_COLS, RANDOM_SEED
 from src.features import compute_descriptors
 from src.quantum_backend import ExecutionConfig, QuantumExecutor
 from src.quantum_models import TrainedQuantumKernelSVM, _fidelity_kernel_via_backend
@@ -109,9 +109,11 @@ class BlindPredictor:
     here. Works with any fitted classical or quantum model that has a
     predict_proba method.
 
-    D50 (the experimental particle size) cannot be computed from a SMILES
-    string alone. If the model's feature list includes D50, callers must
-    pass it explicitly with predict(smiles, d50=...). Leaving it out
+    D50 (the experimental particle size) and apparent_solubility (measured
+    in FaSSIF) cannot be computed from a SMILES string alone -- both are in
+    EXPERIMENTAL_FEATURE_COLS (src/config.py). If the model's feature list
+    includes either one, callers must pass it explicitly with
+    predict(smiles, D50=..., apparent_solubility=...). Leaving one out
     raises an error rather than guessing a value.
     """
 
@@ -120,17 +122,17 @@ class BlindPredictor:
         self.scaler = scaler
         self.feature_names = feature_names
 
-    def predict(self, smiles: str, d50: float | None = None) -> dict:
+    def predict(self, smiles: str, **experimental_values) -> dict:
         descriptors = compute_descriptors(smiles)
         row = []
         for feat in self.feature_names:
-            if feat == "D50":
-                if d50 is None:
+            if feat in EXPERIMENTAL_FEATURE_COLS:
+                if experimental_values.get(feat) is None:
                     raise ValueError(
-                        "D50 is an experimental measurement and cannot be computed from SMILES. "
-                        "Pass d50=<value> explicitly."
+                        f"'{feat}' is an experimental measurement and cannot be computed from "
+                        f"SMILES. Pass {feat}=<value> explicitly, e.g. predict(smiles, {feat}=...)."
                     )
-                row.append(d50)
+                row.append(experimental_values[feat])
             else:
                 row.append(descriptors[feat])
 

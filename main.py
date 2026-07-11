@@ -65,7 +65,7 @@ from src.features import (
     get_modeling_features,
 )
 from src.pca_analysis import get_pc_dominant_cluster, run_pca
-from src.quantum_backend import ExecutionConfig, QuantumExecutor
+from src.quantum_backend import ExecutionConfig, QuantumExecutor, default_execution_config
 from src.quantum_circuits import build_regression_circuit, build_vqc_circuit, reuploading_layer
 from src.quantum_models import (
     FEATURE_MAPS,
@@ -86,6 +86,7 @@ for _noisy_logger in ("qiskit", "qiskit_ibm_runtime", "qiskit_aer", "stevedore")
 logger = logging.getLogger(__name__)
 
 BACKEND_MODE_MAP = {"aer": "aer_simulator", "aer-noisy": "aer_noisy", "ibm-runtime": "ibm_runtime"}
+BACKEND_FLAG_BY_MODE = {mode: flag for flag, mode in BACKEND_MODE_MAP.items()}
 
 
 # --- Plotting helpers ---------------------------------------------------------
@@ -569,8 +570,13 @@ def stage_bonus(data: pd.DataFrame, selection: dict, execution_config: Execution
     model, scaler = fit_deployment_model(make_svc, data[selected_features], data[CLASSIFICATION_TARGET].values)
     blind = BlindPredictor(model, scaler, selected_features)
     demo_smiles = {"Aspirin": "CC(=O)OC1=CC=CC=C1C(=O)O", "Ibuprofen": "CC(C)CC1=CC=C(C=C1)C(C)C(=O)O"}
+    # Demo placeholder values for experimental measurements the model may
+    # need (D50, apparent_solubility): only supplied for whichever of them
+    # actually ended up in selected_features, since BlindPredictor raises
+    # if a required one is missing.
+    demo_experimental_values = {"D50": 50.0, "apparent_solubility": 10.0}
     for name, smiles in demo_smiles.items():
-        kwargs = {"d50": 50.0} if "D50" in selected_features else {}
+        kwargs = {f: v for f, v in demo_experimental_values.items() if f in selected_features}
         result = blind.predict(smiles, **kwargs)
         logger.info("Blind prediction | %s -> %s (confidence=%.3f)", name, result["prediction"], result["confidence"])
 
@@ -611,14 +617,31 @@ STAGE_CHOICES = [
 
 
 def main():
+    # .env (QC_BACKEND_MODE, QC_SHOTS, QC_IBM_BACKEND, QC_JOB_TIMEOUT) sets the
+    # baseline execution target, exactly like default_execution_config() does
+    # everywhere else in this codebase; any --backend/--shots/--ibm-backend
+    # flag passed on the command line overrides it. Without reading env here
+    # too, main.py would silently ignore QC_BACKEND_MODE=ibm_runtime in .env
+    # and always fall back to the local simulator unless --backend was also
+    # passed explicitly on every invocation.
+    env_config = default_execution_config()
+    env_backend_flag = BACKEND_FLAG_BY_MODE.get(env_config.mode, "aer")
+
     parser = argparse.ArgumentParser(description="OQI Hackathon 2026 QML pipeline")
     parser.add_argument("--stage", choices=STAGE_CHOICES, default="all")
     parser.add_argument(
-        "--backend", choices=list(BACKEND_MODE_MAP), default="aer",
-        help="Where quantum circuits actually execute: local ideal (aer), local noisy (aer-noisy), or real IBM Quantum hardware (ibm-runtime).",
+        "--backend", choices=list(BACKEND_MODE_MAP), default=env_backend_flag,
+        help="Where quantum circuits actually execute: local ideal (aer), local noisy (aer-noisy), or real IBM Quantum hardware (ibm-runtime). "
+             f"Defaults to QC_BACKEND_MODE from .env (currently resolves to '{env_backend_flag}').",
     )
-    parser.add_argument("--shots", type=int, default=4096, help="Shots per circuit execution.")
-    parser.add_argument("--ibm-backend", type=str, default=None, help="Specific IBM backend name (default: least-busy).")
+    parser.add_argument(
+        "--shots", type=int, default=env_config.shots,
+        help="Shots per circuit execution. Defaults to QC_SHOTS from .env.",
+    )
+    parser.add_argument(
+        "--ibm-backend", type=str, default=env_config.ibm_backend_name,
+        help="Specific IBM backend name (default: QC_IBM_BACKEND from .env, or least-busy if unset).",
+    )
     parser.add_argument(
         "--max-samples", type=int, default=None,
         help="Cap the number of drugs used in the quantum/bonus stages (< 29 = reduced, non-full LOOCV). "
@@ -628,6 +651,7 @@ def main():
 
     execution_config = ExecutionConfig(
         mode=BACKEND_MODE_MAP[args.backend], shots=args.shots, ibm_backend_name=args.ibm_backend,
+        job_timeout=env_config.job_timeout,
     )
 
     if args.stage == "fetch":

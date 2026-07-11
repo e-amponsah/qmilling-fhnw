@@ -214,6 +214,24 @@ circuit.
 `QC_BACKEND_MODE`, `QC_SHOTS`, and `QC_IBM_BACKEND` in `.env` set the same things as `--backend`,
 `--shots`, and `--ibm-backend` without needing to pass CLI flags every time.
 
+### Waiting for real hardware jobs
+
+A real IBM job can sit queued for minutes to hours. `QuantumExecutor.run_counts_batch`
+(`src/quantum_backend.py`) waits for it properly rather than either blocking silently or giving up
+on the first hiccup:
+
+- It logs the job ID immediately after submission, and logs each status change (`QUEUED` →
+  `RUNNING` → `DONE`) instead of hanging with no visible progress.
+- A transient network error while *checking* status (not the job itself) is retried instead of
+  killing the run -- the job keeps going on IBM's side regardless of whether this process can
+  currently reach the API.
+- `ExecutionConfig.job_timeout` (seconds, default `None` = wait indefinitely) and
+  `job_poll_seconds` (default `15`) control how long to wait and how chatty the status logging is.
+  `job_timeout` can also be set from `.env` via `QC_JOB_TIMEOUT`.
+- If this process is killed or disconnected while a job is still queued or running, the job is not
+  lost: reconnect and pull its results with `recover_ibm_job_counts(job_id)` (same module), using
+  the job ID that was logged at submission time.
+
 Cost and time: local `aer` execution of the full 6-model, 29-fold LOOCV suite takes roughly 20 to
 30 minutes on a laptop (the trained quantum kernel model alone is more expensive; see
 [Kernel Target Alignment](#kernel-target-alignment) below). The same suite against `ibm-runtime`

@@ -1449,3 +1449,37 @@
 19:48:19 | QK-KRR-trained fold fit | KTA_reg=0.3104 -> 0.3791 | alpha=0.01
 19:50:31 | QK-KRR-trained fold fit | KTA_reg=0.2852 -> 0.3628 | alpha=0.01
 19:51:26 | QK-KRR-trained fold fit | KTA_reg=0.3051 -> 0.3783 | alpha=0.01
+19:52:22 | QK-KRR-trained fold fit | KTA_reg=0.3209 -> 0.3688 | alpha=0.01
+19:53:19 | QK-KRR-trained fold fit | KTA_reg=0.3088 -> 0.3753 | alpha=0.01
+19:54:15 | QK-KRR-trained fold fit | KTA_reg=0.3155 -> 0.3865 | alpha=0.01
+19:55:20 | QK-KRR-trained fold fit | KTA_reg=0.2993 -> 0.3404 | alpha=0.01
+19:56:24 | QK-KRR-trained fold fit | KTA_reg=0.3135 -> 0.3924 | alpha=0.01
+19:57:40 | QK-KRR-trained fold fit | KTA_reg=0.3145 -> 0.3778 | alpha=0.01
+19:58:46 | QK-KRR-trained fold fit | KTA_reg=0.2663 -> 0.3216 | alpha=0.01
+19:59:51 | QK-KRR-trained fold fit | KTA_reg=0.2998 -> 0.3194 | alpha=0.01
+20:00:55 | QK-KRR-trained fold fit | KTA_reg=0.3136 -> 0.3832 | alpha=0.01
+20:01:58 | QK-KRR-trained fold fit | KTA_reg=0.3157 -> 0.3870 | alpha=0.01
+20:03:01 | QK-KRR-trained fold fit | KTA_reg=0.3102 -> 0.3445 | alpha=0.01
+20:04:03 | QK-KRR-trained fold fit | KTA_reg=0.3105 -> 0.3547 | alpha=0.01
+20:05:05 | QK-KRR-trained fold fit | KTA_reg=0.3203 -> 0.3658 | alpha=0.01
+20:06:08 | QK-KRR-trained fold fit | KTA_reg=0.3091 -> 0.3782 | alpha=0.01
+20:07:10 | QK-KRR-trained fold fit | KTA_reg=0.3195 -> 0.3642 | alpha=0.01
+20:10:05 | QK-KRR-trained fold fit | KTA_reg=0.3095 -> 0.3800 | alpha=0.01
+20:11:06 | QK-KRR-trained fold fit | KTA_reg=0.3067 -> 0.3851 | alpha=0.01
+20:12:11 | QK-KRR-trained fold fit | KTA_reg=0.3035 -> 0.3766 | alpha=0.01
+20:13:15 | QK-KRR-trained fold fit | KTA_reg=0.3100 -> 0.3561 | alpha=0.01
+20:14:35 | QK-KRR-trained fold fit | KTA_reg=0.3033 -> 0.3693 | alpha=0.01
+20:15:39 | QK-KRR-trained fold fit | KTA_reg=0.3117 -> 0.3500 | alpha=0.01
+20:16:44 | QK-KRR-trained fold fit | KTA_reg=0.3112 -> 0.3841 | alpha=0.01
+20:17:50 | QK-KRR-trained fold fit | KTA_reg=0.3099 -> 0.3832 | alpha=0.01
+20:18:59 | QK-KRR-trained fold fit | KTA_reg=0.3020 -> 0.3521 | alpha=0.01
+20:20:09 | QK-KRR-trained fold fit | KTA_reg=0.3085 -> 0.3777 | alpha=0.01
+20:20:14 |   QK-KRR_trained -> q2=0.175 r2=0.999 mae=2.578 rmse=5.827 (1796.4s)
+20:20:14 | === 6-RDKit done in 3973.2s ===
+20:20:14 | === QCNN classification (fixed 6-qubit, set B) ===
+20:20:14 | QuantumExecutor ready | backend=aer_simulator | shots=4096
+20:20:14 | Running quantum classifier: QCNN (backend=aer_simulator)
+20:23:54 |   QCNN -> accuracy=0.862 f1=0.818 (219.6s)
+20:23:54 | === QCNN-R regression (fixed 6-qubit, set B) ===
+20:23:54 | QuantumExecutor ready | backend=aer_simulator | shots=4096
+20:23:54 | Running quantum regressor: QCNN-R (backend=aer_simulator, target=log(COMDR_15min))

@@ -2,12 +2,18 @@
 
 Reads one normalized JSON per model from a results directory (written by
 `src.evaluation.save_results_json`, called automatically by every
-`main.py` classification/regression stage) and renders four figures:
+`main.py` classification/regression stage) and renders six figures:
 
     1. classification_comparison   -- F1 / recall_1 / accuracy, grouped bars
-    2. regression_comparison       -- Q^2 / RMSE vs the Patzmann benchmark
-    3. per_drug_regression_scatter -- predicted vs. true COMDR15, LOOCV
-    4. per_drug_classification_heatmap -- correct/wrong per model per drug
+    2. roc_comparison              -- ROC curves + AUC, every classifier on one axis
+    3. regression_comparison       -- Q^2 vs RMSE, two panels (never one dual-axis plot)
+    4. per_drug_regression_scatter -- predicted vs. true COMDR15, LOOCV
+    5. per_drug_classification_heatmap -- correct/wrong per model per drug
+    6. kta_comparison               -- fixed feature maps vs. the trained kernel's
+                                        KTA before/after optimization (needs the
+                                        kernel_kta_by_feature_map.csv / kta_optimization.csv
+                                        that main.py's quantum-classification / bonus
+                                        stages write into --results_dir)
 
 Each JSON has the shape:
     {
@@ -20,6 +26,11 @@ Each JSON has the shape:
 
 Usage:
     python scripts/plot_model_comparison.py --results_dir data/results
+
+`main.py --stage all` also calls this module's `main()` automatically at
+the end of a full run, so these figures are produced without a separate
+manual step in the common case; run this script by hand only to rebuild
+plots from an already-populated --results_dir without rerunning LOOCV.
 """
 
 import argparse
@@ -36,7 +47,8 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import seaborn as sns
-from matplotlib.colors import ListedColormap
+from matplotlib.colors import LinearSegmentedColormap, ListedColormap
+from sklearn.metrics import roc_auc_score, roc_curve
 
 # --- Project model registry ---------------------------------------------
 # Kept in sync by hand with QUANTUM_MODEL_BUILDERS / QUANTUM_REGRESSION_MODEL_BUILDERS
@@ -52,14 +64,51 @@ REGRESSION_QUANTUM_MODELS = ["QK-KRR_angle", "VQR_spsa_cobyla", "QCNN-R"]
 PATZMANN_Q2_BENCHMARK = 0.77
 CLASSIFICATION_THRESHOLD = 2.0  # COMDR15 > 2.0 => Responder (challenge brief, Eq. 2)
 
-COLOR_CLASSICAL_ZONE = "#4C72B0"  # blue family: classical-model background shading
-COLOR_QUANTUM_ZONE = "#DD8452"    # orange family: quantum-model background shading
-COLOR_PATZMANN = "black"
+# --- Palette -------------------------------------------------------------
+# A validated categorical palette (fixed order = the CVD-safety mechanism --
+# never cycled, never reassigned by rank/filter). Slot 1 (blue) and slot 8
+# (orange) double as the two-family "classical vs quantum" identity used for
+# zone shading and the accuracy/Q^2 bars, matching this script's original
+# blue/orange convention; the full 8-slot order is used wherever every
+# individual model needs its own identity (the ROC comparison).
+PALETTE_CATEGORICAL = [
+    "#2a78d6",  # 1 blue
+    "#1baf7a",  # 2 aqua
+    "#eda100",  # 3 yellow
+    "#008300",  # 4 green
+    "#4a3aa7",  # 5 violet
+    "#e34948",  # 6 red
+    "#e87ba4",  # 7 magenta
+    "#eb6834",  # 8 orange
+]
+COLOR_CLASSICAL_ZONE = PALETTE_CATEGORICAL[0]  # blue: classical-model identity
+COLOR_QUANTUM_ZONE = PALETTE_CATEGORICAL[7]    # orange: quantum-model identity
+COLOR_PATZMANN = "#0b0b0b"       # primary ink -- reference/benchmark lines
+COLOR_MUTED = "#898781"          # muted ink -- chance lines, secondary annotations
+COLOR_GRID = "#e1e0d9"           # hairline gridline, one shade off the surface
 
 TITLE_FONTSIZE = 14
 LABEL_FONTSIZE = 12
 TICK_FONTSIZE = 10
 DPI = 300
+
+
+def _style_axis(ax: plt.Axes, y_grid: bool = True) -> None:
+    """Shared professional-chart chrome: hairline hyaline gridlines instead
+    of matplotlib's default heavy border, no top/right spine (nothing to
+    frame), and muted tick labels -- applied to every plot in this module
+    so the six figures read as one consistent, deliberately designed set
+    rather than six independently-styled ad hoc charts.
+    """
+    ax.spines["top"].set_visible(False)
+    ax.spines["right"].set_visible(False)
+    for side in ("left", "bottom"):
+        ax.spines[side].set_color(COLOR_GRID)
+        ax.spines[side].set_linewidth(0.9)
+    if y_grid:
+        ax.yaxis.grid(True, color=COLOR_GRID, linewidth=0.9, zorder=0)
+    ax.set_axisbelow(True)
+    ax.tick_params(colors=COLOR_MUTED, labelsize=TICK_FONTSIZE)
 
 
 def load_results(results_dir: str, model_names: list[str] | None = None) -> dict[str, dict]:
@@ -194,10 +243,100 @@ def plot_classification_comparison(
     ax.set_ylim(0, 1.1)
     ax.set_ylabel("Score", fontsize=LABEL_FONTSIZE)
     ax.set_title("LOOCV Classification Results — Classical vs Quantum (N=29)", fontsize=TITLE_FONTSIZE, fontweight="bold")
-    ax.tick_params(labelsize=TICK_FONTSIZE)
     ax.legend(fontsize=TICK_FONTSIZE, loc="upper right", framealpha=0.9)
+    _style_axis(ax)
     fig.tight_layout()
     _save_fig(fig, output_dir, "classification_comparison")
+
+
+def plot_roc_comparison(
+    results: dict[str, dict],
+    classical_models: list[str],
+    quantum_models: list[str],
+    output_dir: Path,
+) -> None:
+    """ROC curves for every classifier, classical and quantum, on one axis
+    -- the single clearest "did quantum actually win" figure in the whole
+    comparison suite: a curve that bows further toward the top-left corner,
+    with a higher AUC in its own legend entry, is the better classifier at
+    every operating threshold simultaneously, not just at the default 0.5
+    cutoff `classification_comparison` reports.
+
+    Built directly from each model's pooled LOOCV out-of-fold predictions
+    (`targets`/`scores` in its JSON) -- the standard way to draw an ROC
+    curve under leave-one-out cross-validation, since no single fold has
+    enough held-out points for its own curve.
+
+    Color identifies the model (fixed 8-slot categorical order, classical
+    models first); line style identifies the family (solid = classical,
+    dashed = quantum) as a second, color-independent encoding, so the two
+    groups are still distinguishable in grayscale or under color
+    blindness. The legend is sorted by AUC descending and doubles as the
+    direct-label layer this many overlapping lines need.
+    """
+    classical_present = [m for m in classical_models if m in results]
+    quantum_present = [m for m in quantum_models if m in results]
+    models = classical_present + quantum_present
+    if not models:
+        print("[plot_roc_comparison] no models found in results, skipping")
+        return
+
+    # Compute every curve and its AUC once up front -- used for the plot,
+    # the legend order, the bold "best model" line weight, and the saved
+    # table-view twin, so nothing is recomputed.
+    curves = {}
+    for name in models:
+        res = results[name]
+        y_true = np.asarray(res["targets"], dtype=float)
+        y_score = np.asarray(res["scores"], dtype=float)
+        fpr, tpr, _ = roc_curve(y_true, y_score)
+        curves[name] = {
+            "fpr": fpr, "tpr": tpr, "auc": roc_auc_score(y_true, y_score),
+            "family": "classical" if name in classical_present else "quantum",
+        }
+    best_model = max(curves, key=lambda m: curves[m]["auc"])
+
+    fig, ax = plt.subplots(figsize=(7.5, 7.0))
+    ax.plot([0, 1], [0, 1], color=COLOR_MUTED, linestyle="--", linewidth=1.1, zorder=1, label="Chance (AUC=0.500)")
+
+    lines_by_model = {}
+    for i, name in enumerate(models):
+        c = curves[name]
+        color = PALETTE_CATEGORICAL[i % len(PALETTE_CATEGORICAL)]
+        (line,) = ax.plot(
+            c["fpr"], c["tpr"], color=color, linestyle="-" if c["family"] == "classical" else "--",
+            linewidth=2.6 if name == best_model else 1.6, zorder=3,
+            label=f"{name} (AUC={c['auc']:.3f})", solid_capstyle="round", dash_capstyle="round",
+        )
+        lines_by_model[name] = line
+
+    # Legend sorted by AUC descending (best model first), chance line last --
+    # so the ranking that answers "which model actually wins" is readable
+    # top-to-bottom without cross-referencing the plot.
+    ranked_models = sorted(models, key=lambda m: -curves[m]["auc"])
+    handles = [lines_by_model[m] for m in ranked_models] + [ax.lines[0]]
+    labels = [f"{m} (AUC={curves[m]['auc']:.3f})" for m in ranked_models] + ["Chance (AUC=0.500)"]
+    ax.legend(
+        handles, labels, fontsize=TICK_FONTSIZE, loc="lower right", framealpha=0.92,
+        title="Solid = classical · Dashed = quantum", title_fontsize=TICK_FONTSIZE - 1,
+    )
+
+    ax.set_xlim(-0.02, 1.02)
+    ax.set_ylim(-0.02, 1.02)
+    ax.set_xlabel("False Positive Rate", fontsize=LABEL_FONTSIZE)
+    ax.set_ylabel("True Positive Rate", fontsize=LABEL_FONTSIZE)
+    ax.set_title("ROC — Classical vs Quantum Classifiers (LOOCV, N=29)", fontsize=TITLE_FONTSIZE, fontweight="bold")
+    ax.set_aspect("equal")
+    _style_axis(ax)
+    fig.tight_layout()
+    _save_fig(fig, output_dir, "roc_comparison")
+
+    # Table-view twin: the exact AUC every curve above corresponds to.
+    auc_table = pd.DataFrame(
+        [{"model": m, "family": curves[m]["family"], "auc": curves[m]["auc"]} for m in ranked_models]
+    )
+    auc_table.to_csv(output_dir / "roc_auc_summary.csv", index=False)
+    print(f"Saved {output_dir / 'roc_auc_summary.csv'}")
 
 
 def plot_regression_comparison(
@@ -231,57 +370,61 @@ def plot_regression_comparison(
 
     q2 = [results[m]["metrics"]["q2"] for m in models]
     rmse = [results[m]["metrics"]["rmse"] for m in models]
-
     x = np.arange(len(models))
-    width = 0.4
-    fig, ax1 = plt.subplots(figsize=(max(8.0, len(models) * 1.7), 6.0))
+
+    # Q^2 and RMSE are different units on different scales -- a dual-axis
+    # (twinx) bar chart would let their arbitrary relative scaling invent a
+    # visual "RMSE goes up as Q^2 goes down" correlation that isn't
+    # actually in the data. Two panels sharing the same model order and
+    # x-axis instead: each bar height is only ever compared against other
+    # bars on its own, honest scale.
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(max(11.0, len(models) * 2.2), 5.6))
 
     _shade_group_zones(ax1, len(classical_sorted), len(models))
-
-    ax1.bar(x - width / 2, q2, width, label="Q² (LOOCV)", color="#1B5E20", zorder=3)
+    ax1.bar(x, q2, width=0.6, color=PALETTE_CATEGORICAL[3], zorder=3)  # green: "higher is better"
     for xi, val in zip(x, q2):
+        # A bar landing within 0.05 of the Pätzmann line (PLS does, by
+        # construction) gets its value label pushed further up so it
+        # clears both the dashed line and its own reference-label text box
+        # instead of sitting on top of them.
+        near_benchmark = val >= 0 and abs(val - PATZMANN_Q2_BENCHMARK) < 0.05
+        offset = 0.11 if near_benchmark else (0.02 if val >= 0 else -0.05)
         ax1.text(
-            xi - width / 2, val + (0.02 if val >= 0 else -0.05), f"{val:.3f}",
+            xi, val + offset, f"{val:.3f}",
             ha="center", va="bottom" if val >= 0 else "top", fontsize=TICK_FONTSIZE, fontweight="bold",
         )
-
-    # Both reference labels anchored at the left edge (not right), so
-    # neither collides with the "upper right" legend. Pushed further above
-    # the line (+0.07, not +0.02) and given a white backing box, since a
-    # model landing close to the Patzmann Q^2 (as PLS itself does, by
-    # construction) would otherwise have its own bar-top value annotation
-    # sitting right where this label would go.
     ax1.axhline(PATZMANN_Q2_BENCHMARK, color=COLOR_PATZMANN, linestyle="--", linewidth=1.3, zorder=4)
     ax1.text(
-        -0.45, PATZMANN_Q2_BENCHMARK + 0.07,
-        f"Pätzmann benchmark (PLS, Q²={PATZMANN_Q2_BENCHMARK:.2f})",
-        ha="left", va="bottom", fontsize=TICK_FONTSIZE, style="italic", zorder=5,
+        -0.45, PATZMANN_Q2_BENCHMARK + 0.05, f"Pätzmann benchmark (PLS, Q²={PATZMANN_Q2_BENCHMARK:.2f})",
+        ha="left", va="bottom", fontsize=TICK_FONTSIZE - 1, style="italic", zorder=5,
         bbox=dict(facecolor="white", alpha=0.85, edgecolor="none", pad=1.5),
     )
-    ax1.axhline(0.0, color="grey", linestyle=":", linewidth=1.1, zorder=4)
+    ax1.axhline(0.0, color=COLOR_MUTED, linestyle=":", linewidth=1.1, zorder=4)
     ax1.text(
         -0.45, 0.02, "Baseline (predict mean)",
-        ha="left", va="bottom", fontsize=TICK_FONTSIZE - 1, color="grey", style="italic", zorder=5,
+        ha="left", va="bottom", fontsize=TICK_FONTSIZE - 2, color=COLOR_MUTED, style="italic", zorder=5,
         bbox=dict(facecolor="white", alpha=0.85, edgecolor="none", pad=1.5),
     )
-
-    ax1.set_ylabel("Q² (LOOCV)", fontsize=LABEL_FONTSIZE, color="#1B5E20")
-    ax1.set_ylim(min(-0.5, min(q2) - 0.1), 1.0)
-    ax1.tick_params(axis="y", labelcolor="#1B5E20", labelsize=TICK_FONTSIZE)
+    ax1.set_ylabel("Q² (LOOCV) — higher is better", fontsize=LABEL_FONTSIZE)
+    ax1.set_ylim(min(-0.5, min(q2) - 0.15), 1.0)
     ax1.set_xticks(x)
     ax1.set_xticklabels(models, rotation=20, ha="right", fontsize=TICK_FONTSIZE)
+    ax1.set_title("Q² vs Pätzmann benchmark", fontsize=TITLE_FONTSIZE - 1, fontweight="bold")
+    _style_axis(ax1)
 
-    ax2 = ax1.twinx()
-    ax2.bar(x + width / 2, rmse, width, label="RMSE (COMDR15 units)", color="#C0392B", alpha=0.85, zorder=3)
-    ax2.set_ylabel("RMSE (COMDR15 units)", fontsize=LABEL_FONTSIZE, color="#C0392B")
-    ax2.tick_params(axis="y", labelcolor="#C0392B", labelsize=TICK_FONTSIZE)
+    _shade_group_zones(ax2, len(classical_sorted), len(models))
+    ax2.bar(x, rmse, width=0.6, color=PALETTE_CATEGORICAL[5], zorder=3)  # red: "lower is better"
+    for xi, val in zip(x, rmse):
+        ax2.text(xi, val + max(rmse) * 0.015, f"{val:.2f}", ha="center", va="bottom", fontsize=TICK_FONTSIZE, fontweight="bold")
+    ax2.set_ylabel("RMSE (COMDR15 units) — lower is better", fontsize=LABEL_FONTSIZE)
+    ax2.set_ylim(0, max(rmse) * 1.15)
+    ax2.set_xticks(x)
+    ax2.set_xticklabels(models, rotation=20, ha="right", fontsize=TICK_FONTSIZE)
+    ax2.set_title("RMSE (physical COMDR15 units)", fontsize=TITLE_FONTSIZE - 1, fontweight="bold")
+    _style_axis(ax2)
 
-    ax1.set_title("LOOCV Regression Results — Q² vs Pätzmann Benchmark (N=29)", fontsize=TITLE_FONTSIZE, fontweight="bold")
-    lines1, labels1 = ax1.get_legend_handles_labels()
-    lines2, labels2 = ax2.get_legend_handles_labels()
-    ax1.legend(lines1 + lines2, labels1 + labels2, fontsize=TICK_FONTSIZE, loc="upper right", framealpha=0.9)
-
-    fig.tight_layout()
+    fig.suptitle("LOOCV Regression Results — Classical vs Quantum (N=29)", fontsize=TITLE_FONTSIZE, fontweight="bold")
+    fig.tight_layout(rect=[0, 0, 1, 0.94])
     _save_fig(fig, output_dir, "regression_comparison")
 
 
@@ -322,7 +465,7 @@ def plot_per_drug_regression_scatter(
         m = res["metrics"]
 
         correct_side = (y_true > CLASSIFICATION_THRESHOLD) == (y_pred > CLASSIFICATION_THRESHOLD)
-        colors = np.where(correct_side, "#2E7D32", "#C0392B")
+        colors = np.where(correct_side, "#0ca30c", "#d03b3b")  # status palette: good / critical
 
         ax.scatter(y_true, y_pred, c=colors, s=60, edgecolor="k", linewidth=0.5, zorder=3)
 
@@ -345,8 +488,8 @@ def plot_per_drug_regression_scatter(
         ax.set_xlabel("True COMDR15", fontsize=LABEL_FONTSIZE)
         ax.set_ylabel("Predicted COMDR15", fontsize=LABEL_FONTSIZE)
         ax.set_title(f"{label} ({model_name})\nQ²={m['q2']:.3f}, RMSE={m['rmse']:.3f}", fontsize=TITLE_FONTSIZE - 1)
-        ax.tick_params(labelsize=TICK_FONTSIZE)
         ax.legend(fontsize=TICK_FONTSIZE - 1, loc="upper left")
+        _style_axis(ax, y_grid=False)
 
     fig.suptitle(
         "Per-Drug LOOCV Predictions — Best Quantum Regressor vs PLS Baseline",
@@ -391,7 +534,7 @@ def plot_per_drug_classification_heatmap(
         correctness[row] = correct[order]
 
     fig, ax = plt.subplots(figsize=(max(12.0, len(order) * 0.5), max(4.0, len(models) * 0.6)))
-    cmap = ListedColormap(["#C0392B", "#2E7D32"])  # 0 -> wrong (red), 1 -> correct (green)
+    cmap = ListedColormap(["#d03b3b", "#0ca30c"])  # status palette: 0 -> wrong (critical), 1 -> correct (good)
     sns.heatmap(
         correctness, cmap=cmap, cbar=False, linewidths=0.6, linecolor="white",
         xticklabels=[f"{d}\n{c:.2f}" for d, c in zip(sorted_drugs, sorted_comdr)],
@@ -418,7 +561,107 @@ def plot_per_drug_classification_heatmap(
     _save_fig(fig, output_dir, "per_drug_classification_heatmap")
 
 
-def main() -> None:
+def plot_kta_comparison(results_dir: Path, output_dir: Path) -> None:
+    """Horizontal bar chart: raw Kernel Target Alignment for the fixed
+    (untrained) feature map encodings, next to our KTA-optimized trained
+    kernel's alignment before vs. after COBYLA training.
+
+    Reads two small CSVs `main.py` writes as a side effect of the
+    quantum-classification and bonus stages:
+      - kernel_kta_by_feature_map.csv: columns feature_map, kta -- the
+        Task 3 diagnostic KTA for each fixed encoding (angle/entangled/zz).
+      - kta_optimization.csv: columns kta_before, kta_after -- the trained
+        kernel's KTA against a random initial weight vector vs. after
+        COBYLA optimization (see TrainedQuantumKernelSVM in
+        src/quantum_models.py).
+    Skips with a printed message (not an error) if either file is missing,
+    so a partial run (e.g. quantum-classification without bonus, or vice
+    versa) still produces whatever half of this comparison it can.
+
+    What to look for: this is the direct evidence for "training the kernel
+    helps" -- the fixed encodings show KTA is a fairly weak, un-optimized
+    property of an arbitrary circuit choice, while the trained kernel's
+    bar visibly grows from its own (similarly weak) random starting point
+    once COBYLA optimizes its weights against the training labels.
+    """
+    fm_path = Path(results_dir) / "kernel_kta_by_feature_map.csv"
+    opt_path = Path(results_dir) / "kta_optimization.csv"
+    rows = []
+    if fm_path.exists():
+        fm_df = pd.read_csv(fm_path)
+        for _, r in fm_df.iterrows():
+            rows.append({"label": f"Fixed: {r['feature_map']}", "kta": float(r["kta"]), "kind": "fixed"})
+    else:
+        print(f"[plot_kta_comparison] {fm_path} not found, skipping the fixed-encoding bars")
+
+    if opt_path.exists():
+        opt_df = pd.read_csv(opt_path)
+        before, after = float(opt_df["kta_before"].iloc[0]), float(opt_df["kta_after"].iloc[0])
+        rows.append({"label": "Trained kernel (before)", "kta": before, "kind": "trained_before"})
+        rows.append({"label": "Trained kernel (after)", "kta": after, "kind": "trained_after"})
+    else:
+        print(f"[plot_kta_comparison] {opt_path} not found, skipping the trained-kernel bars")
+
+    if not rows:
+        print("[plot_kta_comparison] no KTA data found in results_dir, skipping")
+        return
+
+    table = pd.DataFrame(rows)
+    color_by_kind = {
+        "fixed": COLOR_MUTED,
+        "trained_before": PALETTE_CATEGORICAL[7] + "80",  # orange, translucent: not yet optimized
+        "trained_after": PALETTE_CATEGORICAL[7],           # orange, solid: the optimized result
+    }
+    colors = [color_by_kind[k] for k in table["kind"]]
+
+    fig, ax = plt.subplots(figsize=(8.5, 1.1 + 0.7 * len(table)))
+    y = np.arange(len(table))
+    ax.barh(y, table["kta"], color=colors, height=0.6, zorder=3)
+    for yi, val in zip(y, table["kta"]):
+        ax.text(val + 0.012, yi, f"{val:.3f}", va="center", fontsize=TICK_FONTSIZE, fontweight="bold")
+
+    # An arrow from before -> after, annotated with the exact improvement,
+    # if both trained-kernel rows are present -- the one number this whole
+    # figure exists to make impossible to miss.
+    before_idx = table.index[table["kind"] == "trained_before"]
+    after_idx = table.index[table["kind"] == "trained_after"]
+    if len(before_idx) and len(after_idx):
+        bi, ai = before_idx[0], after_idx[0]
+        b_val, a_val = table["kta"].iloc[bi], table["kta"].iloc[ai]
+        ax.annotate(
+            "", xy=(a_val, y[ai]), xytext=(b_val, y[bi]),
+            arrowprops=dict(arrowstyle="->", color=COLOR_PATZMANN, linewidth=1.4,
+                             connectionstyle="arc3,rad=0.35"),
+        )
+        ax.text(
+            max(b_val, a_val) + 0.09, (y[bi] + y[ai]) / 2,
+            f"+{a_val - b_val:.3f} from training", fontsize=TICK_FONTSIZE, fontweight="bold",
+            color=COLOR_PATZMANN, va="center",
+        )
+
+    ax.set_yticks(y)
+    ax.set_yticklabels(table["label"], fontsize=TICK_FONTSIZE)
+    ax.invert_yaxis()  # first row (first fixed encoding) at the top
+    ax.set_xlim(0, max(0.05, float(table["kta"].max())) * 1.35)
+    ax.set_xlabel("Kernel Target Alignment (higher = kernel geometry matches labels better)", fontsize=LABEL_FONTSIZE)
+    ax.set_title("Kernel Target Alignment — Fixed Encodings vs. Our Trained Kernel", fontsize=TITLE_FONTSIZE, fontweight="bold")
+    _style_axis(ax, y_grid=False)
+    ax.xaxis.grid(True, color=COLOR_GRID, linewidth=0.9, zorder=0)
+    ax.set_axisbelow(True)
+    fig.tight_layout()
+    _save_fig(fig, output_dir, "kta_comparison")
+
+    table.drop(columns="kind").to_csv(output_dir / "kta_comparison_table.csv", index=False)
+    print(f"Saved {output_dir / 'kta_comparison_table.csv'}")
+
+
+def main(argv: list[str] | None = None) -> None:
+    """argv defaults to None, which makes argparse read sys.argv[1:] as
+    usual for `python scripts/plot_model_comparison.py ...`. Callers that
+    import and invoke this directly (main.py, after a full pipeline run)
+    pass argv=[] explicitly instead, so this never tries to parse main.py's
+    own --stage/--backend/etc. flags as its own arguments.
+    """
     from src.config import MODELING_TABLE_CSV, PLOTS_DIR, RESULTS_DIR
 
     parser = argparse.ArgumentParser(description="Build the unified classical-vs-quantum comparison plots (Task 5).")
@@ -435,13 +678,14 @@ def main() -> None:
         help="CSV with 'drug' and 'COMDR_15min' columns, in the same row order as the LOOCV runs "
              "(default: data/processed/modeling_table.csv). Used for Plot 3's outlier labels and all of Plot 4.",
     )
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
     output_dir = Path(args.output_dir)
 
     clf_results = load_results(args.results_dir, CLASSIFICATION_CLASSICAL_MODELS + CLASSIFICATION_QUANTUM_MODELS)
     reg_results = load_results(args.results_dir, REGRESSION_CLASSICAL_MODELS + REGRESSION_QUANTUM_MODELS)
 
     plot_classification_comparison(clf_results, CLASSIFICATION_CLASSICAL_MODELS, CLASSIFICATION_QUANTUM_MODELS, output_dir)
+    plot_roc_comparison(clf_results, CLASSIFICATION_CLASSICAL_MODELS, CLASSIFICATION_QUANTUM_MODELS, output_dir)
     plot_regression_comparison(reg_results, REGRESSION_CLASSICAL_MODELS, REGRESSION_QUANTUM_MODELS, output_dir)
 
     drug_names, true_comdr15 = None, None
@@ -463,6 +707,8 @@ def main() -> None:
 
     if true_comdr15 is not None:
         plot_per_drug_classification_heatmap(clf_results, drug_names, true_comdr15, output_dir)
+
+    plot_kta_comparison(Path(args.results_dir), output_dir)
 
 
 if __name__ == "__main__":

@@ -1,0 +1,5 @@
+model,accuracy,f1,recall_class0,recall_class1,n_folds,elapsed_s
+VQC,1.0,1.0,1.0,1.0,4,29.3047055999632
+QCNN,0.5,0.5,0.5,0.5,4,48.50693080003839
+QK-SVM_trained,0.0,0.0,0.0,0.0,4,39.09231490001548
+QK-SVM_angle,0.0,0.0,0.0,0.0,4,2.1576679999707267

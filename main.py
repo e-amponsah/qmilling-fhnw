@@ -448,11 +448,13 @@ def stage_quantum_classification(
 
     # Task 3: kernel heatmap and KTA score for each feature map, sharing one executor.
     kernel_executor = QuantumExecutor(execution_config)
+    raw_kta_by_feature_map = {}
     for fm_name in ["angle", "entangled", "zz"]:
         X_scaled = MinMaxScaler(feature_range=(0, np.pi)).fit_transform(X)
         K = compute_quantum_kernel_matrix(X_scaled, kernel_executor, feature_map_name=fm_name)
         kta = kernel_target_alignment(K, y)
         logger.info("Feature map=%s | KTA=%.4f", fm_name, kta)
+        raw_kta_by_feature_map[fm_name] = kta
 
         order = np.argsort(y)
         K_sorted = K[np.ix_(order, order)]
@@ -462,6 +464,13 @@ def stage_quantum_classification(
         fig.tight_layout()
         fig.savefig(PLOTS_DIR / "kernels" / f"kernel_heatmap_{fm_name}.png", dpi=150)
         plt.close(fig)
+
+    # Saved so scripts/plot_model_comparison.py's plot_kta_comparison can
+    # show these fixed-encoding scores next to the trained kernel's
+    # before/after KTA (kta_optimization.csv, written by stage_bonus).
+    pd.DataFrame(
+        {"feature_map": list(raw_kta_by_feature_map), "kta": list(raw_kta_by_feature_map.values())}
+    ).to_csv(RESULTS_DIR / "kernel_kta_by_feature_map.csv", index=False)
 
     # Task 4: run the full quantum classifier suite under LOOCV. The QCNN
     # needs exactly 6 qubits, so it runs separately on its own 6 feature
@@ -553,6 +562,12 @@ def stage_bonus(data: pd.DataFrame, selection: dict, execution_config: Execution
     kta_model = KTAOptimizedQuantumKernel(executor=kta_executor, n_layers=3, maxiter=60)
     kta_model.fit(X_scaled, y)
     logger.info("KTA optimization: %.4f -> %.4f", kta_model.kta_before_, kta_model.kta_after_)
+    # Saved so scripts/plot_model_comparison.py's plot_kta_comparison can
+    # show this next to the fixed encodings' raw KTA
+    # (kernel_kta_by_feature_map.csv, written by stage_quantum_classification).
+    pd.DataFrame([{"kta_before": kta_model.kta_before_, "kta_after": kta_model.kta_after_}]).to_csv(
+        RESULTS_DIR / "kta_optimization.csv", index=False
+    )
 
     logger.info("Running execution-degradation study (ideal vs. %s)...", execution_config.label())
     comparison_config = execution_config if execution_config.mode != "aer_simulator" else ExecutionConfig(mode="aer_noisy")
@@ -594,16 +609,38 @@ def stage_unified_comparison(clf_results: dict, quantum_results: dict) -> None:
     logger.info("Unified comparison:\n%s", table.to_string())
 
     fig, ax = plt.subplots(figsize=(9, 5))
-    colors = ["#4C72B0" if m in clf_results else "#DD8452" for m in table["model"]]
-    ax.bar(table["model"], table["accuracy"], color=colors)
-    ax.axhline(0.5, color="grey", linestyle="--", linewidth=1, label="majority baseline")
+    colors = ["#2a78d6" if m in clf_results else "#eb6834" for m in table["model"]]
+    ax.bar(table["model"], table["accuracy"], color=colors, zorder=3)
+    ax.axhline(0.5, color="#898781", linestyle="--", linewidth=1, label="majority baseline")
     ax.set_ylabel("LOOCV accuracy")
     ax.set_title("Classical (blue) vs Quantum (orange): unified LOOCV comparison")
+    ax.yaxis.grid(True, color="#e1e0d9", linewidth=0.9, zorder=0)
+    ax.set_axisbelow(True)
+    ax.spines["top"].set_visible(False)
+    ax.spines["right"].set_visible(False)
     plt.xticks(rotation=30, ha="right")
     ax.legend()
     fig.tight_layout()
     fig.savefig(PLOTS_DIR / "unified_comparison.png", dpi=150)
     plt.close(fig)
+
+    # The richer classical-vs-quantum comparison suite (ROC/AUC, KTA
+    # before/after, per-drug scatter/heatmap, etc.) -- see
+    # scripts/plot_model_comparison.py. Reads the *.json files every
+    # classification/regression stage above already writes via
+    # save_results_json, so it needs no arguments here; run it by hand
+    # later (`python scripts/plot_model_comparison.py`) to rebuild just
+    # these plots without rerunning any LOOCV.
+    try:
+        from scripts.plot_model_comparison import main as build_comparison_plots
+
+        build_comparison_plots([])
+    except Exception:
+        logger.exception(
+            "scripts/plot_model_comparison.py failed to build the extended comparison plots; "
+            "the core results above were still saved successfully. Run it manually to see the "
+            "full error: python scripts/plot_model_comparison.py"
+        )
 
 
 STAGE_CHOICES = [

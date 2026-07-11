@@ -1,0 +1,8 @@
+model,family,auc
+RandomForest,classical,0.9375
+QK-SVM_trained,quantum,0.9278846153846154
+QK-SVM_angle,quantum,0.923076923076923
+SVC_rbf,classical,0.9086538461538463
+QCNN,quantum,0.9086538461538461
+VQC,quantum,0.9038461538461539
+GradientBoosting,classical,0.8990384615384616

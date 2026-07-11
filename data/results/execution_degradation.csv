@@ -1,0 +1,2 @@
+baseline_label,comparison_label,baseline_accuracy_mean,comparison_accuracy_mean,degradation,baseline_accuracy_per_fold,comparison_accuracy_per_fold
+aer_simulator,aer_noisy,0.8333333333333334,0.8333333333333334,0.0,"[0.5, 1.0, 1.0]","[0.5, 1.0, 1.0]"

@@ -101,6 +101,7 @@ def loocv_evaluate_regression(
     loo = LeaveOneOut()
 
     y_true, y_pred = [], []
+    t0 = time.perf_counter()
     for train_idx, test_idx in loo.split(X_arr):
         X_train, X_test = X_arr[train_idx], X_arr[test_idx]
         y_train, y_test = y_arr[train_idx], y_arr[test_idx]
@@ -114,6 +115,7 @@ def loocv_evaluate_regression(
         model.fit(X_train, y_train)
         y_pred.append(float(np.asarray(model.predict(X_test)).reshape(-1)[0]))
         y_true.append(float(y_test[0]))
+    elapsed = time.perf_counter() - t0
 
     y_true, y_pred = np.array(y_true), np.array(y_pred)
     q2 = r2_score(y_true, y_pred)  # Q^2 is just R^2 computed on the LOOCV predictions
@@ -124,7 +126,7 @@ def loocv_evaluate_regression(
     full_model.fit(X_full, y_arr)
     r2_train = r2_score(y_arr, full_model.predict(X_full))
 
-    metrics = {"q2_loocv": q2, "r2_train": r2_train, "n_folds": len(y_true)}
+    metrics = {"q2_loocv": q2, "r2_train": r2_train, "n_folds": len(y_true), "elapsed_s": elapsed}
     return {"y_true": y_true, "y_pred": y_pred, "metrics": metrics}
 
 
@@ -148,7 +150,13 @@ def summarize_results(results_by_model: dict[str, dict], kind: str = "classifica
         row = {"model": name, **res["metrics"]}
         rows.append(row)
     df = pd.DataFrame(rows)
-    sort_col = "accuracy" if kind == "classification" else "q2_loocv"
+    if kind == "classification":
+        sort_col = "accuracy"
+    else:
+        # "q2_loocv" for loocv_evaluate_regression() output (e.g. PLS),
+        # "q2" for run_quantum_regression_suite() output -- both name the
+        # same LOOCV-R^2 quantity, just under the key each caller settled on.
+        sort_col = "q2_loocv" if "q2_loocv" in df.columns else "q2"
     if sort_col in df.columns:
         df = df.sort_values(sort_col, ascending=False).reset_index(drop=True)
     return df

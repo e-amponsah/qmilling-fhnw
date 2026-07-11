@@ -66,9 +66,11 @@ from src.quantum_circuits import build_vqc_circuit, reuploading_layer
 from src.quantum_models import (
     FEATURE_MAPS,
     QUANTUM_MODEL_BUILDERS,
+    QUANTUM_REGRESSION_MODEL_BUILDERS,
     build_qcnn_circuit,
     compute_quantum_kernel_matrix,
     run_quantum_classification_suite,
+    run_quantum_regression_suite,
 )
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s", datefmt="%H:%M:%S")
@@ -329,6 +331,28 @@ def plot_circuit_diagrams(n_features: int, n_qcnn_features: int = 6) -> None:
     logger.info("Saved %d circuit diagrams to %s", len(circuits), PLOTS_DIR / "circuits")
 
 
+def plot_quantum_regression_q2(reg_table: pd.DataFrame) -> None:
+    """Bar chart of each quantum regressor's LOOCV Q^2 against the Patzmann
+    et al. Q^2=0.77 benchmark line -- the regression-suite counterpart of
+    `stage_unified_comparison`'s classification accuracy bar chart.
+    """
+    fig, ax = plt.subplots(figsize=(7, 4.5))
+    colors = ["#55A868" if q2 >= 0 else "#C44E52" for q2 in reg_table["q2"]]
+    ax.bar(reg_table["model"], reg_table["q2"], color=colors)
+    ax.axhline(
+        PATZMANN_Q2_BENCHMARK, color="#4C72B0", linestyle="--", linewidth=1.5,
+        label=f"Patzmann Q2 benchmark ({PATZMANN_Q2_BENCHMARK:.2f})",
+    )
+    ax.axhline(0, color="grey", linewidth=0.8)
+    ax.set_ylabel("Q2 (LOOCV)")
+    ax.set_title("Quantum regression suite vs. Patzmann Q2 benchmark")
+    plt.xticks(rotation=20, ha="right")
+    ax.legend()
+    fig.tight_layout()
+    fig.savefig(PLOTS_DIR / "scatter" / "quantum_regression_q2.png", dpi=150)
+    plt.close(fig)
+
+
 # --- Stage 3: quantum feature map + models -----------------------------------
 
 def stage_quantum(data: pd.DataFrame, selection: dict, execution_config: ExecutionConfig, max_samples: int | None) -> dict:
@@ -395,6 +419,30 @@ def stage_quantum(data: pd.DataFrame, selection: dict, execution_config: Executi
     fig.tight_layout()
     fig.savefig(PLOTS_DIR / "scatter" / "score_vs_comdr.png", dpi=150)
     plt.close(fig)
+
+    # Quantum regression suite (QK-KRR, VQR, QCNN-R): predicts COMDR_15min
+    # directly, comparable to the Patzmann Q^2=0.77 / R^2=0.82 benchmark.
+    # QCNN-R shares QCNN's fixed-6-qubit constraint, so it runs on the same
+    # dedicated 6-feature subset as the classifier above.
+    y_reg_full = data[REGRESSION_TARGET].values
+    y_reg = y_reg_full[:max_samples] if (max_samples is not None and max_samples < len(y_reg_full)) else y_reg_full
+
+    non_qcnn_reg_names = [n for n in QUANTUM_REGRESSION_MODEL_BUILDERS if n != "QCNN-R"]
+    quantum_regression_results = run_quantum_regression_suite(
+        X, y_reg, execution_config=execution_config, model_names=non_qcnn_reg_names
+    )
+    logger.info("Running QCNN-R on its dedicated 6-feature subset: %s", selection["features_by_k"][6])
+    quantum_regression_results.update(
+        run_quantum_regression_suite(X_qcnn, y_reg, execution_config=execution_config, model_names=["QCNN-R"])
+    )
+
+    reg_table = summarize_results(quantum_regression_results, kind="regression")
+    save_results_table(reg_table, "quantum_regression_loocv.csv")
+    logger.info(
+        "Quantum regression LOOCV results (backend=%s, Patzmann Q2 benchmark=%.2f):\n%s",
+        execution_config.label(), PATZMANN_Q2_BENCHMARK, reg_table.to_string(),
+    )
+    plot_quantum_regression_q2(reg_table)
 
     return quantum_results
 

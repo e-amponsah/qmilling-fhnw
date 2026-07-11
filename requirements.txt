@@ -14,3 +14,4 @@ matplotlib>=3.8
 seaborn>=0.13
 requests>=2.31
 pylatexenc>=2.10
+pytest>=8.0

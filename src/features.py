@@ -223,6 +223,31 @@ def select_k_best_features(
     }
 
 
+def _resolve_qcnn_features(X: pd.DataFrame, y: pd.Series, manual_features_qcnn: list[str] | None) -> list[str]:
+    """Resolve the fixed 6-feature subset used by the QCNN / QCNN-R models.
+
+    If MANUAL_FEATURES_QCNN is set in .env, it is validated (must be exactly
+    6 known columns) and used directly. Otherwise falls back to an automated
+    6-feature selection, independent of whichever feature count the other
+    models ended up using.
+    """
+    if manual_features_qcnn:
+        if len(manual_features_qcnn) != 6:
+            raise ValueError(
+                f"MANUAL_FEATURES_QCNN (.env) has {len(manual_features_qcnn)} feature(s), but the "
+                f"QCNN needs exactly 6 (one per qubit): {manual_features_qcnn}"
+            )
+        invalid = [f for f in manual_features_qcnn if f not in X.columns]
+        if invalid:
+            raise ValueError(
+                f"MANUAL_FEATURES_QCNN (.env) contains unknown column(s): {invalid}. "
+                f"Valid candidates are: {list(X.columns)}"
+            )
+        logger.info("Using manual QCNN feature override from .env: %s", manual_features_qcnn)
+        return list(manual_features_qcnn)
+    return select_k_best_features(X, y, k_range=(6, 6))["features_by_k"][6]
+
+
 def get_modeling_features(
     X: pd.DataFrame, y: pd.Series, k_range: tuple[int, int] = FEATURE_SELECT_K_RANGE, **kwargs
 ) -> dict:
@@ -237,11 +262,13 @@ def get_modeling_features(
     scores_by_k, selected_features, features_by_k), so callers do not need
     to know which path was taken.
 
-    features_by_k[6] is always filled in, even in manual mode with a
-    different number of features, because the QCNN model needs exactly 6
-    qubits and falls back to an automated 6 feature selection on its own.
+    features_by_k[6] is always filled in, because the QCNN model needs
+    exactly 6 qubits. It comes from MANUAL_FEATURES_QCNN (.env) if that is
+    set (independently of MANUAL_FEATURES, which covers every other model),
+    from MANUAL_FEATURES itself when that happens to already be a 6 feature
+    list, or otherwise from an automated 6 feature selection.
     """
-    from src.config import MANUAL_FEATURES
+    from src.config import MANUAL_FEATURES, MANUAL_FEATURES_QCNN
 
     if MANUAL_FEATURES:
         invalid = [f for f in MANUAL_FEATURES if f not in X.columns]
@@ -253,13 +280,15 @@ def get_modeling_features(
         logger.info("Using manual feature override from .env: %s", MANUAL_FEATURES)
 
         features_by_k = {len(MANUAL_FEATURES): list(MANUAL_FEATURES)}
-        if len(MANUAL_FEATURES) != 6:
+        if MANUAL_FEATURES_QCNN:
+            features_by_k[6] = _resolve_qcnn_features(X, y, MANUAL_FEATURES_QCNN)
+        elif len(MANUAL_FEATURES) != 6:
             logger.info(
                 "MANUAL_FEATURES has %d feature(s), not 6, so the QCNN model "
                 "(which needs exactly 6 qubits) will use an automated 6 feature selection instead.",
                 len(MANUAL_FEATURES),
             )
-            features_by_k[6] = select_k_best_features(X, y, k_range=(6, 6))["features_by_k"][6]
+            features_by_k[6] = _resolve_qcnn_features(X, y, None)
 
         return {
             "source": "manual",
@@ -271,6 +300,8 @@ def get_modeling_features(
 
     result = select_k_best_features(X, y, k_range=k_range, **kwargs)
     result["source"] = "automated"
+    if MANUAL_FEATURES_QCNN:
+        result["features_by_k"][6] = _resolve_qcnn_features(X, y, MANUAL_FEATURES_QCNN)
     return result
 
 

@@ -147,6 +147,23 @@ def probability_of_one(counts: dict[str, int], qubit: int, shots: int) -> float:
     return ones / shots
 
 
+def expectation_value_z(counts: dict[str, int], qubit: int, shots: int) -> float:
+    """Estimate <Z_q> = P(0) - P(1) for qubit q from a Sampler counts
+    dictionary. Qiskit bitstrings are little endian, so the rightmost
+    character is qubit 0.
+
+    The result lies in [-1, 1] and is centered on 0, which is a better
+    regression feature than raw P(1): it keeps a classical Ridge head from
+    seeing every output qubit's signal pre-biased toward one end of [0, 1]
+    (used by `VariationalQuantumRegressor` and `QCNNRegressor`).
+    """
+    if shots == 0 or not counts:
+        return 0.0
+    zeros = sum(c for bitstring, c in counts.items() if bitstring[::-1][qubit] == "0")
+    ones = sum(c for bitstring, c in counts.items() if bitstring[::-1][qubit] == "1")
+    return (zeros - ones) / shots
+
+
 def fidelity_from_counts(counts: dict[str, int], num_qubits: int, shots: int) -> float:
     """Estimate fidelity from a compute-uncompute circuit's measurement
     counts: it is the probability of measuring all zeros.

@@ -1,0 +1,52 @@
+21:35:31 | INFO | Loading cached SMILES from /Users/goni/OQI-Hackathon-2026----FNHW-/data/raw/smiles_29_drugs.csv
+21:35:31 | INFO | All four Patzmann et al. reference variables are reproducible from the provided data: ['D50', 'MolLogP', 'Kappa3', 'apparent_solubility'].
+21:35:31 | INFO | Saved /Users/goni/OQI-Hackathon-2026----FNHW-/data/processed/modeling_table.csv (29 rows x 21 cols)
+21:35:31 | INFO | Top correlations with COMDR_15min:
+D50                    0.811339
+Kappa3                 0.310955
+Kappa1                 0.291228
+apparent_solubility   -0.275527
+Kappa2                 0.236271
+Chi0v                  0.236252
+MolWt                  0.229071
+MolLogP                0.211886
+NumRotatableBonds      0.169463
+NumHDonors            -0.166606
+Chi1v                  0.152496
+FractionCSP3           0.116756
+BertzCT                0.110113
+RingCount             -0.097542
+TPSA                  -0.031771
+NumHAcceptors         -0.000125
+21:35:31 | INFO | Saved 4 PCA diagnostic plots to /Users/goni/OQI-Hackathon-2026----FNHW-/plots/pca (4 PC(s) cover 80% variance, 7 cover 95%)
+21:35:31 | INFO | PCA redundancy clusters (features sharing a dominant PC among the top 3): {'PC1': ['MolWt', 'TPSA', 'NumHAcceptors', 'NumHDonors', 'NumRotatableBonds', 'Kappa1', 'Kappa2', 'Kappa3', 'Chi0v', 'Chi1v', 'BertzCT', 'RingCount', 'apparent_solubility'], 'PC2': ['MolLogP', 'FractionCSP3'], 'PC3': ['D50']}
+21:35:31 | INFO | Using manual feature override from .env: ['Kappa3', 'D50', 'MolLogP', 'apparent_solubility']
+21:35:31 | INFO | Using manual QCNN feature override from .env: ['Kappa3', 'D50', 'MolLogP', 'apparent_solubility', 'FractionCSP3', 'BertzCT']
+21:35:31 | INFO | Feature selection (source=manual): best_k=4, scores_by_k={}
+21:35:31 | INFO | Selected features: ['Kappa3', 'D50', 'MolLogP', 'apparent_solubility']
+21:35:31 | INFO | 6-feature subset (for the fixed 6-qubit QCNN): ['Kappa3', 'D50', 'MolLogP', 'apparent_solubility', 'FractionCSP3', 'BertzCT']
+21:35:31 | INFO | Running classical classifier: SVC_rbf
+21:35:31 | INFO |   SVC_rbf -> accuracy=0.862 f1=0.833
+21:35:31 | INFO | Running classical classifier: RandomForest
+21:35:33 | INFO |   RandomForest -> accuracy=0.897 f1=0.880
+21:35:33 | INFO | Running classical classifier: GradientBoosting
+21:35:33 | INFO |   GradientBoosting -> accuracy=0.931 f1=0.923
+21:35:33 | INFO | Saved /Users/goni/OQI-Hackathon-2026----FNHW-/data/results/classical_loocv.csv
+21:35:33 | INFO | Saved /Users/goni/OQI-Hackathon-2026----FNHW-/data/results/SVC_rbf.json
+21:35:33 | INFO | Saved /Users/goni/OQI-Hackathon-2026----FNHW-/data/results/RandomForest.json
+21:35:33 | INFO | Saved /Users/goni/OQI-Hackathon-2026----FNHW-/data/results/GradientBoosting.json
+21:35:33 | INFO | Classical LOOCV results:
+              model  accuracy        f1  recall_class0  recall_class1  n_folds  elapsed_s
+0  GradientBoosting  0.931034  0.923077         0.9375       0.923077       29   0.330539
+1      RandomForest  0.896552  0.880000         0.9375       0.846154       29   1.749898
+2           SVC_rbf  0.862069  0.833333         0.9375       0.769231       29   0.077150
+21:35:33 | INFO | Running PLS regression baseline (n_components=2, target=log(COMDR_15min))
+21:35:33 | INFO |   PLS -> Q2(LOOCV)=0.756 R2(train)=0.828 (target=log(COMDR_15min))
+21:35:33 | INFO | Saved /Users/goni/OQI-Hackathon-2026----FNHW-/data/results/pls_regression_loocv.csv
+21:35:33 | INFO | Saved /Users/goni/OQI-Hackathon-2026----FNHW-/data/results/PLS_regression.json
+21:35:33 | INFO | PLS regression LOOCV: Q2=0.756 (Patzmann benchmark Q2=0.77), R2(train)=0.828 (Patzmann R2=0.82)
+21:35:34 | INFO | Saved 11 circuit diagrams to /Users/goni/OQI-Hackathon-2026----FNHW-/plots/circuits
+21:35:38 | INFO | QuantumExecutor ready | backend=ibm_runtime[ibm_miami] | shots=4096
+21:35:41 | INFO | IBM Runtime job submitted | job_id=d999m30tcv6s73dn1m50 | backend=ibm_runtime[ibm_miami] | if this process is interrupted, recover its results later with recover_ibm_job_counts('d999m30tcv6s73dn1m50')
+21:35:41 | INFO | IBM Runtime job d999m30tcv6s73dn1m50 | status=QUEUED | elapsed=0s
+21:35:56 | INFO | IBM Runtime job d999m30tcv6s73dn1m50 | status=RUNNING | elapsed=15s

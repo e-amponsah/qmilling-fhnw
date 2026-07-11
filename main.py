@@ -409,7 +409,7 @@ def stage_bonus(data: pd.DataFrame, selection: dict, execution_config: Execution
     logger.info("Running KTA optimization (trained quantum kernel, backend=%s)...", execution_config.label())
     X_scaled = MinMaxScaler(feature_range=(0, np.pi)).fit_transform(X)
     kta_executor = QuantumExecutor(execution_config)
-    kta_model = KTAOptimizedQuantumKernel(executor=kta_executor, n_layers=1, maxiter=40)
+    kta_model = KTAOptimizedQuantumKernel(executor=kta_executor, n_layers=3, maxiter=60)
     kta_model.fit(X_scaled, y)
     logger.info("KTA optimization: %.4f -> %.4f", kta_model.kta_before_, kta_model.kta_after_)
 

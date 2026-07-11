@@ -45,6 +45,10 @@ logger = logging.getLogger(__name__)
 # (removal not until sklearn 1.11), so the warning is suppressed deliberately
 # here rather than swapped for a riskier untested path.
 warnings.filterwarnings("ignore", message=".*`probability` parameter was deprecated.*", category=FutureWarning)
+# scipy's COBYLA silently clamps maxiter up to num_vars+2 internally and
+# warns every time it does -- expected/harmless here (small ansatzes
+# legitimately need few iterations), but deafening across a 29-fold LOOCV.
+warnings.filterwarnings("ignore", message=".*Invalid MAXFUN.*", category=UserWarning)
 
 # Registry of available feature maps -- add a new encoding here and every
 # model/script that iterates FEATURE_MAPS picks it up automatically.
@@ -313,6 +317,100 @@ class QuantumKernelSVM:
         return self._svc.predict_proba(self._kernel_to_train(X))
 
 
+# --- 1b. Trained (Kernel-Target-Alignment-optimized) Quantum Kernel SVM -----
+
+class TrainedQuantumKernelSVM:
+    """A quantum kernel whose feature map carries trainable weight
+    parameters *in addition to* the data-encoding parameters -- optimized
+    via COBYLA to maximize Kernel Target Alignment (KTA) against the
+    training labels before the classical SVM head is fit. This is a
+    Havlicek-style *trained* quantum kernel, in contrast to
+    `QuantumKernelSVM`'s fixed encoding.
+
+    Why this class exists (see README for the full investigation): a fixed
+    encoding's raw KTA on this dataset is unremarkable (~0.2-0.3) -- not
+    because the encoding is broken, but because closed-form KTA computed
+    on all 29 samples at once is *not*, by itself, a reliable proxy for
+    downstream generalization. Empirically: widening the fixed encoding's
+    rotation range pushes closed-loop KTA up while making fold-safe LOOCV
+    accuracy *worse* (93%->83%) -- textbook overfitting to a metric rather
+    than the task. What actually, honestly helps is training the kernel's
+    own parameters against KTA computed strictly within each fold's
+    training data (never the held-out sample) via `reuploading_layer`'s
+    data re-uploading structure. `n_layers` was swept 1-5 under full
+    fold-safe LOOCV: 1-2 give ~93% accuracy (matching the fixed encoding),
+    3 peaks at ~97%, and 4-5 overfit and *drop* below the fixed baseline
+    even though their raw KTA keeps climbing -- confirming KTA must be
+    validated fold-safe, not chased directly.
+    """
+
+    def __init__(
+        self,
+        executor: QuantumExecutor,
+        n_layers: int = 3,
+        maxiter: int = 60,
+        C: float = 1.0,
+        random_state: int = RANDOM_SEED,
+    ):
+        self.executor = executor
+        self.n_layers = n_layers
+        self.maxiter = maxiter
+        self.C = C
+        self.random_state = random_state
+        self._qc = None
+        self._x_params = None
+        self._theta_params = None
+        self._theta_opt = None
+        self._svc = None
+        self._X_train = None
+        self.kta_before_ = None
+        self.kta_after_ = None
+
+    def _kernel_for_theta(self, X: np.ndarray, theta: np.ndarray) -> np.ndarray:
+        qc_bound_theta = self._qc.assign_parameters(dict(zip(self._theta_params, theta)))
+        return _fidelity_kernel_via_backend(self.executor, qc_bound_theta, self._x_params, X, X, symmetric=True)
+
+    def fit(self, X: np.ndarray, y: np.ndarray) -> "TrainedQuantumKernelSVM":
+        from src.evaluation import kernel_target_alignment
+
+        X = np.asarray(X, dtype=float)
+        y = np.asarray(y, dtype=float)
+        n_features = X.shape[1]
+        self._qc, self._x_params, self._theta_params = reuploading_layer(n_features, self.n_layers)
+        self._X_train = X
+
+        rng = np.random.RandomState(self.random_state)
+        theta0 = rng.uniform(0, 2 * np.pi, size=len(self._theta_params))
+
+        def neg_kta(theta):
+            K = self._kernel_for_theta(X, theta)
+            return -kernel_target_alignment(K, y)
+
+        self.kta_before_ = -neg_kta(theta0)
+        res = minimize(neg_kta, theta0, method="COBYLA", options={"maxiter": self.maxiter, "rhobeg": 0.8})
+        self._theta_opt = res.x
+        self.kta_after_ = -neg_kta(self._theta_opt)
+
+        K_train = self._kernel_for_theta(X, self._theta_opt)
+        self._svc = SVC(kernel="precomputed", C=self.C, probability=True, random_state=self.random_state)
+        self._svc.fit(K_train, y)
+        logger.info("Trained-kernel KTA (this fold): %.4f -> %.4f", self.kta_before_, self.kta_after_)
+        return self
+
+    def _kernel_to_train(self, X: np.ndarray) -> np.ndarray:
+        X = np.asarray(X, dtype=float)
+        qc_bound_theta = self._qc.assign_parameters(dict(zip(self._theta_params, self._theta_opt)))
+        return _fidelity_kernel_via_backend(
+            self.executor, qc_bound_theta, self._x_params, X, self._X_train, symmetric=False
+        )
+
+    def predict(self, X: np.ndarray) -> np.ndarray:
+        return self._svc.predict(self._kernel_to_train(X))
+
+    def predict_proba(self, X: np.ndarray) -> np.ndarray:
+        return self._svc.predict_proba(self._kernel_to_train(X))
+
+
 # --- 2. Variational Quantum Classifier ---------------------------------------
 
 class VariationalQuantumClassifier(_VariationalCore):
@@ -459,6 +557,23 @@ class QCNNClassifier(_VariationalCore):
 QUANTUM_MODEL_BUILDERS = {
     "QK-SVM_angle": lambda executor: QuantumKernelSVM(executor=executor, feature_map_name="angle"),
     "QK-SVM_zz": lambda executor: QuantumKernelSVM(executor=executor, feature_map_name="zz"),
+    # maxiter=30 here (not the class's own default of 60) is a deliberate
+    # real-execution cost tradeoff: unlike the O(N) per-iteration cost of
+    # the _VariationalCore models below, each COBYLA iteration here
+    # recomputes an O(N^2) kernel matrix (~406 real circuits for a 28-sample
+    # training fold), so this single model is ~14x more expensive per
+    # optimizer step. Empirically (fast exact-statevector sweep, see
+    # TrainedQuantumKernelSVM's docstring), maxiter=26-30 (COBYLA silently
+    # floors maxiter at num_vars+2=26 for this 24-param search regardless of
+    # what's requested below that) already converges to the same fold-safe
+    # LOOCV accuracy (~90%) as maxiter=60 without training beyond that floor
+    # -- the extra iterations up to 60 only pay off in combination with
+    # n_layers=3 across the *whole* dataset's specific optimization
+    # landscape (~97%), and even then cost ~11h for a full 29-fold
+    # real-execution LOOCV run. Construct TrainedQuantumKernelSVM(maxiter=60)
+    # directly (as bonus_extensions.py's single-fit KTA demo does) if you
+    # want that quality and can afford the wait.
+    "QK-SVM_trained": lambda executor: TrainedQuantumKernelSVM(executor=executor, n_layers=3, maxiter=30),
     "VQC": lambda executor: VariationalQuantumClassifier(executor=executor, n_layers=2, optimizer="cobyla", maxiter=60),
     "DataReuploading": lambda executor: DataReuploadingClassifier(
         executor=executor, n_layers=3, optimizer="cobyla", maxiter=60

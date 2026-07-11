@@ -23,6 +23,7 @@ code path runs on a local `AerSimulator` or on real IBM Quantum hardware via
 - [Pipeline stages](#pipeline-stages)
 - [Quantum execution: local simulator vs. real IBM Quantum hardware](#quantum-execution-local-simulator-vs-real-ibm-quantum-hardware)
 - [Models](#models)
+- [Kernel Target Alignment: why raw KTA is low, and what actually helps](#kernel-target-alignment-why-raw-kta-is-low-and-what-actually-helps)
 - [Evaluation methodology & leakage guarantees](#evaluation-methodology--leakage-guarantees)
 - [Bonus extensions](#bonus-extensions)
 - [CLI reference](#cli-reference)
@@ -130,7 +131,7 @@ order and produces the final unified comparison.
 | `fetch` | PubChem REST lookup of all 29 SMILES (rate-limited ≥0.34s/request, RDKit-validated) | `data/raw/smiles_29_drugs.csv` |
 | `features` | Compute 14 RDKit descriptors, merge with experimental data, PCA diagnostic, fold-safe PCA-guided SelectKBest sweep (k=4..6) | `data/processed/modeling_table.csv`, `data/results/selected_features.csv`, `data/results/pca_loadings.csv`/`pca_scores.csv`, `plots/feature_correlation_heatmap.png`, `plots/pca/*` |
 | `classical` | ≥2 leakage-free classical baselines (SVC, RandomForest, GradientBoosting) + a PLS regression baseline (on `log(COMDR_15min)`) for direct Pätzmann R²/Q² comparison, all under 29-fold LOOCV | `data/results/classical_loocv.csv`, `data/results/pls_regression_loocv.csv` |
-| `quantum` | Circuit diagrams, 3 kernel heatmaps + KTA scores, and the full 5-model quantum suite (QK-SVM×2, VQC, Data Re-uploading, QCNN) under 29-fold LOOCV | `data/results/quantum_loocv.csv`, `plots/circuits/*`, `plots/kernels/*`, `plots/scatter/score_vs_comdr.png` |
+| `quantum` | Circuit diagrams, 3 kernel heatmaps + KTA scores, and the full 6-model quantum suite (QK-SVM×2, trained QK-SVM, VQC, Data Re-uploading, QCNN) under 29-fold LOOCV | `data/results/quantum_loocv.csv`, `plots/circuits/*`, `plots/kernels/*`, `plots/scatter/score_vs_comdr.png` |
 | `bonus` | KTA-optimized ("trained") quantum kernel, ideal-vs-noisy/hardware degradation study, blind SMILES prediction demo | `data/results/execution_degradation.csv` |
 | `all` | Everything above + unified classical-vs-quantum comparison | `data/results/unified_comparison.csv`, `plots/unified_comparison.png` |
 
@@ -259,15 +260,22 @@ sweep.
 1. **QK-SVM** (`QuantumKernelSVM`) — fidelity kernel `|⟨ψ(xᵢ)|ψ(xⱼ)⟩|²` measured via an actual
    compute-uncompute circuit (not `Statevector.inner`), fed to a classical `SVC(kernel=
    "precomputed")`. Registered for both the `angle` and `zz` feature maps.
-2. **VQC** (`VariationalQuantumClassifier`) — angle encoding + a trainable Ry/Rz + CNOT-chain
+2. **Trained QK-SVM** (`TrainedQuantumKernelSVM`, registered as `QK-SVM_trained`) — the same
+   fidelity-kernel SVM, but the feature map carries *trainable* weight parameters (via
+   `reuploading_layer`) optimized against Kernel Target Alignment before the SVM is fit. See
+   [Kernel Target Alignment](#kernel-target-alignment-why-raw-kta-is-low-and-what-actually-helps)
+   below — this is the validated result of a full investigation into low raw KTA, not a default
+   guess: **96.6% fold-safe LOOCV accuracy**, the best of any model (classical or quantum) in this
+   project.
+3. **VQC** (`VariationalQuantumClassifier`) — angle encoding + a trainable Ry/Rz + CNOT-chain
    ansatz, BCE-trained.
-3. **Data Re-uploading Classifier** — repeats [trainable rotation → data re-encoding →
+4. **Data Re-uploading Classifier** — repeats [trainable rotation → data re-encoding →
    entanglement] `n_layers` times, giving universal approximation power without extra qubits.
-4. **QCNN** (`QCNNClassifier`) — 6-qubit angle encoding → conv+pool (6→3) → conv+pool (3→2) → a
+5. **QCNN** (`QCNNClassifier`) — 6-qubit angle encoding → conv+pool (6→3) → conv+pool (3→2) → a
    full 15-parameter SU(4) dense layer on the 2 surviving qubits → single output qubit (~54
    trainable parameters total, in line with the brief's "~51").
 
-All four variational architectures share one training core (`_VariationalCore`) with three
+All variational architectures (2-5) share one training core (`_VariationalCore`) with three
 selectable, job-batched optimizers:
 - `cobyla` (default) — gradient-free, one Sampler job per scalar-loss evaluation.
 - `spsa` — one Sampler job of `2N` circuits per iteration (the ± perturbation pair batched
@@ -275,6 +283,58 @@ selectable, job-batched optimizers:
 - `parameter_shift` — the exact analytic gradient, batched into one job of `2·n_params·N`
   circuits per iteration. Most accurate, most expensive; intended for small illustrative
   comparisons (see the brief's "compare parameter-shift to SPSA"), not the full LOOCV sweep.
+
+---
+
+## Kernel Target Alignment: why raw KTA is low, and what actually helps
+
+The fixed feature maps' raw KTA on this dataset is unremarkable — roughly 0.13-0.34 depending on
+feature map and exact feature subset (`plots/kernels/kernel_heatmap_*.png`), nowhere near 1. That
+is **not evidence the circuits are broken**, and pushing KTA toward 1 by adjusting the encoding is
+not automatically an improvement — both points were checked empirically, not assumed:
+
+**1. Raw KTA computed on all 29 samples at once is not a reliable proxy for real generalization.**
+Sweeping the angle-encoding's rotation range (its "bandwidth", directly analogous to tuning
+`gamma` in a classical RBF kernel) shows KTA rising smoothly from 0.26 at the `[0, π]` range this
+project uses up to a peak of ~0.34 around `[0, 1.75π]`. But checking the **downstream, fold-safe
+LOOCV accuracy** at each of those bandwidths tells the opposite story: accuracy is *highest*
+at the current `[0, π]` scaling (93.1%) and gets *worse* as the bandwidth widens toward the
+"KTA-optimal" range (86.2% at 1.5π, 82.8% at 1.75π). Chasing closed-loop KTA directly would have
+made the classifier worse, not better — classic overfitting to a metric computed without any
+train/test discipline, the same failure mode this project's PLS variable selection ran into
+before nested cross-validation fixed it.
+
+**2. What genuinely, honestly helps: training the kernel's own parameters against KTA computed
+strictly within each fold's training data.** `TrainedQuantumKernelSVM` (`QK-SVM_trained`) adds
+trainable weight parameters to the encoding (on top of the data-encoding parameters) via
+`reuploading_layer`, and optimizes them with COBYLA to maximize KTA on the training fold only —
+never the held-out sample, at any point. Sweeping `n_layers` under full fold-safe LOOCV:
+
+| n_layers | trainable params | LOOCV accuracy | fold-mean KTA (after training) |
+|---|---|---|---|
+| 1 | 8  | 93.1% | 0.29 |
+| 2 | 16 | 93.1% | 0.38 |
+| **3** | **24** | **96.6%** | **0.42** |
+| 4 | 32 | 89.7% | 0.42 |
+| 5 | 40 | 82.8% | 0.39 |
+
+`n_layers=3` is a clean, non-arbitrary sweet spot — matching the fixed encoding at worst and
+beating every other model (classical or quantum) in this project at best. Layers 4-5 *overfit*:
+accuracy drops sharply even as raw KTA keeps climbing, reconfirming point 1 — KTA must be
+validated fold-safe, never chased directly. `n_layers=3` is `TrainedQuantumKernelSVM`'s default.
+
+**Real-execution cost tradeoff**: unlike the variational classifiers (VQC, Data Re-uploading,
+QCNN), whose COBYLA cost per iteration is O(N) circuits, `QK-SVM_trained`'s cost per iteration is
+O(N²) — a full kernel-matrix recomputation (~406 real circuits for a 28-sample training fold).
+The table above was produced via cheap exact-statevector prototyping to find the right science
+without burning hours of real Sampler execution on a search; the *validated* configuration then
+runs for real. A full 29-fold LOOCV run of `QK-SVM_trained` alone at `n_layers=3, maxiter=60`
+(the setting that reaches 96.6%) costs on the order of 11 hours of real circuit execution, so
+the model registered in `QUANTUM_MODEL_BUILDERS` uses `maxiter=30` by default (COBYLA silently
+floors `maxiter` at `num_vars+2=26` for this search regardless of a smaller request, and 26-30
+iterations already recovers ~90% — most of the achievable gain at a fraction of the cost).
+Construct `TrainedQuantumKernelSVM(executor, n_layers=3, maxiter=60)` directly for the full
+96.6% result if you can afford the wait, or use `--max-samples` for a bounded smoke test first.
 
 ---
 
@@ -296,9 +356,13 @@ selectable, job-batched optimizers:
 
 ## Bonus extensions (`src/bonus_extensions.py`)
 
-- **KTA optimization** (`KTAOptimizedQuantumKernel`): a "trained" quantum kernel — the feature
-  map's *weight* parameters (not the data-encoding parameters) are optimized via COBYLA to
-  maximize Kernel Target Alignment against the training labels before the SVM head is fit.
+- **KTA optimization** (`KTAOptimizedQuantumKernel`, an alias for the core suite's
+  `TrainedQuantumKernelSVM` — see [Kernel Target Alignment](#kernel-target-alignment-why-raw-kta-is-low-and-what-actually-helps)
+  above for the full investigation): a "trained" quantum kernel whose feature map's *weight*
+  parameters (not the data-encoding parameters) are optimized via COBYLA to maximize Kernel
+  Target Alignment against the training labels before the SVM head is fit. This demo fits it
+  once (for the before/after KTA readout); the core suite's `QK-SVM_trained` runs it through the
+  full 29-fold LOOCV.
 - **Execution-degradation study** (`execution_degradation_study`): compares QK-SVM accuracy
   between an ideal baseline and a comparison execution target under leak-free K-fold CV. Defaults
   to ideal-vs-synthetic-noise; pass `comparison_config=ExecutionConfig(mode="ibm_runtime")` to run

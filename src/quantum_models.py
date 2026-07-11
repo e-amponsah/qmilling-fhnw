@@ -126,34 +126,17 @@ def compute_quantum_kernel_matrix(
     return _fidelity_kernel_via_backend(executor, qc, x_params, X, X, symmetric=True)
 
 
-def _bce_loss(probs: np.ndarray, y: np.ndarray, sample_weight: np.ndarray | None = None) -> float:
-    """Binary cross entropy, optionally weighted per sample.
-
-    Used unweighted by every classifier except `QuantumClassicalHybridBoosting`,
-    whose AdaBoost rounds need each weak learner trained against the boosting
-    weights from the previous round. When `sample_weight` is given, weights
-    are rescaled so `mean(w_i * n) == 1` -- this keeps the loss at the same
-    order of magnitude regardless of how skewed the weight distribution gets
-    across rounds, which matters because COBYLA's `rhobeg`/`maxiter` were
-    tuned against the unweighted loss's scale.
-    """
+def _bce_loss(probs: np.ndarray, y: np.ndarray) -> float:
     eps = 1e-9
     p = np.clip(probs, eps, 1 - eps)
-    n = len(y)
-    if sample_weight is None:
-        w = np.ones(n)
-    else:
-        w = np.asarray(sample_weight, dtype=float)
-        w = w * n / w.sum()
-    return float(-np.mean(w * (y * np.log(p) + (1 - y) * np.log(1 - p))))
+    return float(-np.mean(y * np.log(p) + (1 - y) * np.log(1 - p)))
 
 
 # --- Shared training code for the variational models -------------------------
 
 class _VariationalCore:
-    """Shared fit and predict logic for the VQC, the data re-uploading
-    classifier, and the QCNN. These three models differ only in circuit
-    shape, so all the training code lives here once.
+    """Shared fit and predict logic for the VQC and the QCNN. These models
+    differ only in circuit shape, so all the training code lives here once.
 
     Subclasses implement _build_circuit(n_features) and set
     self.output_qubit. A live QuantumExecutor must be passed in and should
@@ -208,17 +191,7 @@ class _VariationalCore:
         shots = self.executor.config.shots
         return np.array([probability_of_one(c, self.output_qubit, shots) for c in counts_list])
 
-    def fit(self, X: np.ndarray, y: np.ndarray, sample_weight: np.ndarray | None = None) -> "_VariationalCore":
-        """Fit the ansatz's parameters against (weighted) BCE loss.
-
-        `sample_weight`, when given, is forwarded into `_bce_loss` -- the
-        mechanism `QuantumClassicalHybridBoosting` uses to train each
-        boosting round's weak learner against the previous rounds' errors.
-        Only "cobyla" and "spsa" support it; "parameter_shift" computes its
-        gradient analytically from the unweighted BCE derivative and would
-        need a different closed form, so it raises instead of silently
-        ignoring the weights.
-        """
+    def fit(self, X: np.ndarray, y: np.ndarray) -> "_VariationalCore":
         X = np.asarray(X, dtype=float)
         y = np.asarray(y, dtype=float)
         n_features = X.shape[1]
@@ -228,16 +201,12 @@ class _VariationalCore:
         theta0 = rng.uniform(0, 2 * np.pi, size=len(self._theta_params))
 
         if self.optimizer == "cobyla":
-            loss_fn = lambda theta: _bce_loss(self._predict_probs(theta, X), y, sample_weight)
+            loss_fn = lambda theta: _bce_loss(self._predict_probs(theta, X), y)
             res = minimize(loss_fn, theta0, method="COBYLA", options={"maxiter": self.maxiter, "rhobeg": 0.8})
             self._theta_opt = res.x
         elif self.optimizer == "spsa":
-            self._theta_opt = self._optimize_spsa(theta0, X, y, sample_weight=sample_weight)
+            self._theta_opt = self._optimize_spsa(theta0, X, y)
         elif self.optimizer == "parameter_shift":
-            if sample_weight is not None:
-                raise ValueError(
-                    "sample_weight is not supported with optimizer='parameter_shift'; use 'cobyla' or 'spsa'."
-                )
             self._theta_opt = self._optimize_parameter_shift(theta0, X, y)
         else:
             raise ValueError(f"Unknown optimizer: {self.optimizer}")
@@ -260,7 +229,7 @@ class _VariationalCore:
         probs = np.array([probability_of_one(c, self.output_qubit, shots) for c in counts_list])
         return probs[:n], probs[n:]
 
-    def _optimize_spsa(self, theta0, X, y, sample_weight=None, a=0.3, c=0.2, alpha=0.602, gamma=0.101) -> np.ndarray:
+    def _optimize_spsa(self, theta0, X, y, a=0.3, c=0.2, alpha=0.602, gamma=0.101) -> np.ndarray:
         rng = np.random.RandomState(self.random_state)
         theta = theta0.copy()
         for k in range(1, self.maxiter + 1):
@@ -268,8 +237,8 @@ class _VariationalCore:
             ck = c / (k ** gamma)
             delta = rng.choice([-1.0, 1.0], size=theta.shape)
             probs_plus, probs_minus = self._predict_probs_batch_pair(theta + ck * delta, theta - ck * delta, X)
-            loss_plus = _bce_loss(probs_plus, y, sample_weight)
-            loss_minus = _bce_loss(probs_minus, y, sample_weight)
+            loss_plus = _bce_loss(probs_plus, y)
+            loss_minus = _bce_loss(probs_minus, y)
             ghat = (loss_plus - loss_minus) / (2 * ck * delta)
             theta = theta - ak * ghat
         return theta
@@ -341,14 +310,12 @@ class QuantumKernelSVM:
         self._X_train = None
         self._qc = None
         self._x_params = None
-        self._K_train = None
 
     def fit(self, X: np.ndarray, y: np.ndarray) -> "QuantumKernelSVM":
         X = np.asarray(X, dtype=float)
         self._qc, self._x_params = FEATURE_MAPS[self.feature_map_name](X.shape[1], **self.feature_map_kwargs)
         self._X_train = X
         K_train = _fidelity_kernel_via_backend(self.executor, self._qc, self._x_params, X, X, symmetric=True)
-        self._K_train = K_train  # cached so ensembles (QuantumEnsembleClassifier) can reuse it, not recompute it
         self._svc = SVC(kernel="precomputed", C=self.C, probability=True, random_state=RANDOM_SEED)
         self._svc.fit(K_train, y)
         return self
@@ -470,23 +437,6 @@ class VariationalQuantumClassifier(_VariationalCore):
         return build_vqc_circuit(n_features, self.n_layers)
 
 
-# --- 3. Data Re-uploading Classifier -----------------------------------------
-
-class DataReuploadingClassifier(_VariationalCore):
-    """Repeats a trainable rotation, data re-encoding, and entanglement
-    block n_layers times. Uploading the data more than once gives the
-    circuit more expressive power without needing more qubits.
-    """
-
-    def __init__(self, n_layers: int = 3, **kwargs):
-        super().__init__(**kwargs)
-        self.n_layers = n_layers
-
-    def _build_circuit(self, n_features: int):
-        self.output_qubit = 0
-        return reuploading_layer(n_features, self.n_layers)
-
-
 # --- 4. Quantum Convolutional Neural Network ---------------------------------
 
 def _conv_block(params) -> QuantumCircuit:
@@ -604,6 +554,47 @@ class QCNNClassifier(_VariationalCore):
         return qc, x, theta
 
 
+# --- Shared kernel-ridge-regression utilities (QK-KRR, QK-KRR-trained) ------
+
+def _normalize_fidelity_kernel(K: np.ndarray, diag_a: np.ndarray, diag_b: np.ndarray) -> np.ndarray:
+    """K_norm[i, j] = K[i, j] / sqrt(diag_a[i] * diag_b[j]).
+
+    Rescales every kernel entry to what it would be if both feature
+    vectors had unit self-fidelity, stabilizing KernelRidge when raw
+    fidelities cluster close to 1 (a common symptom of angle-encoded
+    feature maps on a small number of qubits).
+    """
+    denom = np.clip(np.sqrt(np.outer(diag_a, diag_b)), 1e-12, None)
+    return K / denom
+
+
+def _select_alpha_via_inner_loocv(
+    K_norm: np.ndarray, y: np.ndarray, alpha_grid: tuple[float, ...], default_alpha: float
+) -> float:
+    """Pick the alpha_grid candidate with the best Q^2 under a leave-one-out
+    sweep *within* the training fold (never touching the outer LOOCV's
+    held-out sample -- this is called from inside `fit`, which only ever
+    sees a training fold). No new quantum circuits are needed: every
+    candidate alpha is scored by refitting `KernelRidge` on submatrices of
+    the already-computed `K_norm`, since fidelity is a fixed, precomputed
+    kernel independent of alpha.
+    """
+    n = len(y)
+    best_alpha, best_q2 = default_alpha, -np.inf
+    for alpha in alpha_grid:
+        preds = np.zeros(n)
+        for i in range(n):
+            mask = np.ones(n, dtype=bool)
+            mask[i] = False
+            krr_i = KernelRidge(kernel="precomputed", alpha=alpha)
+            krr_i.fit(K_norm[np.ix_(mask, mask)], y[mask])
+            preds[i] = krr_i.predict(K_norm[i, mask].reshape(1, -1))[0]
+        q2 = r2_score(y, preds)
+        if q2 > best_q2:
+            best_q2, best_alpha = q2, alpha
+    return best_alpha
+
+
 # --- 5. Quantum Kernel Ridge Regression --------------------------------------
 
 class QuantumKernelRidgeRegression:
@@ -666,18 +657,6 @@ class QuantumKernelRidgeRegression:
         self.kernel_frobenius_norm_ = None
         self.kernel_effective_rank_ = None
 
-    @staticmethod
-    def _normalize_kernel(K: np.ndarray, diag_a: np.ndarray, diag_b: np.ndarray) -> np.ndarray:
-        """K_norm[i, j] = K[i, j] / sqrt(diag_a[i] * diag_b[j]).
-
-        Rescales every kernel entry to what it would be if both feature
-        vectors had unit self-fidelity, stabilizing KernelRidge when raw
-        fidelities cluster close to 1 (a common symptom of angle-encoded
-        feature maps on a small number of qubits).
-        """
-        denom = np.clip(np.sqrt(np.outer(diag_a, diag_b)), 1e-12, None)
-        return K / denom
-
     def fit(self, X: np.ndarray, y: np.ndarray) -> "QuantumKernelRidgeRegression":
         X = np.asarray(X, dtype=float)
         y = np.asarray(y, dtype=float)
@@ -686,7 +665,7 @@ class QuantumKernelRidgeRegression:
 
         K_train = _fidelity_kernel_via_backend(self.executor, self._qc, self._x_params, X, X, symmetric=True)
         self._K_diag_train = np.clip(np.diag(K_train), 1e-12, None)
-        K_norm = self._normalize_kernel(K_train, self._K_diag_train, self._K_diag_train)
+        K_norm = _normalize_fidelity_kernel(K_train, self._K_diag_train, self._K_diag_train)
 
         # Expressibility diagnostics on the normalized training kernel.
         self.kernel_frobenius_norm_ = float(np.linalg.norm(K_norm, "fro"))
@@ -697,24 +676,7 @@ class QuantumKernelRidgeRegression:
         entropy = -np.sum(p_nonzero * np.log(p_nonzero)) if len(p_nonzero) else 0.0
         self.kernel_effective_rank_ = float(np.exp(entropy))
 
-        # Inner alpha sweep: leave-one-out *within* the training fold,
-        # scoring each candidate alpha's Q^2 on precomputed-kernel refits
-        # only (no new quantum circuits -- K_norm is reused throughout).
-        n = len(y)
-        best_alpha, best_q2 = self.alpha, -np.inf
-        for alpha in self.alpha_grid:
-            preds = np.zeros(n)
-            for i in range(n):
-                mask = np.ones(n, dtype=bool)
-                mask[i] = False
-                krr_i = KernelRidge(kernel="precomputed", alpha=alpha)
-                krr_i.fit(K_norm[np.ix_(mask, mask)], y[mask])
-                preds[i] = krr_i.predict(K_norm[i, mask].reshape(1, -1))[0]
-            q2 = r2_score(y, preds)
-            if q2 > best_q2:
-                best_q2, best_alpha = q2, alpha
-        self.alpha_ = best_alpha
-
+        self.alpha_ = _select_alpha_via_inner_loocv(K_norm, y, self.alpha_grid, self.alpha)
         self._krr = KernelRidge(kernel="precomputed", alpha=self.alpha_)
         self._krr.fit(K_norm, y)
         logger.info(
@@ -732,7 +694,132 @@ class QuantumKernelRidgeRegression:
         # LOOCV-held-out sample in the standard pipeline.
         K_self = _fidelity_kernel_via_backend(self.executor, self._qc, self._x_params, X, X, symmetric=True)
         diag_test = np.clip(np.diag(K_self), 1e-12, None)
-        return self._normalize_kernel(K, diag_test, self._K_diag_train)
+        return _normalize_fidelity_kernel(K, diag_test, self._K_diag_train)
+
+    def predict(self, X: np.ndarray) -> np.ndarray:
+        return self._krr.predict(self._kernel_to_train(X))
+
+    def score(self, X: np.ndarray, y: np.ndarray) -> float:
+        return r2_score(y, self.predict(X))
+
+
+# --- 5b. Trained (KTA_reg-optimized) Quantum Kernel Ridge Regression ---------
+
+class TrainedQuantumKernelRidgeRegression:
+    """QK-KRR whose feature map has its own trainable weight parameters,
+    optimized via COBYLA to maximize a continuous-target Kernel Target
+    Alignment (`continuous_kernel_target_alignment`) against the training
+    fold's labels, before `KernelRidge` is fit on the resulting kernel --
+    the regression counterpart of `TrainedQuantumKernelSVM`.
+
+    Mirrors `TrainedQuantumKernelSVM`'s two-stage structure exactly: stage
+    1 trains the kernel's own geometry against KTA_reg (never seeing the
+    held-out LOOCV sample, since `fit` only ever runs on a training fold),
+    stage 2 fits a classical regression head on the now-fixed kernel --
+    reusing the same normalization and inner alpha-sweep machinery as
+    `QuantumKernelRidgeRegression` (`_normalize_fidelity_kernel`,
+    `_select_alpha_via_inner_loocv`).
+
+    Parameters
+    ----------
+    executor : QuantumExecutor
+    n_layers : int, default=3
+        `reuploading_layer` depth. Kept at the value already found optimal
+        for `TrainedQuantumKernelSVM`'s classification KTA (swept 1-5
+        there; see its docstring) rather than independently re-swept for
+        regression -- a reasonable starting point since both use the same
+        circuit family and the same ~28-29-sample regime, but worth
+        revisiting with its own sweep if LOOCV shows clear under/overfitting.
+    maxiter : int, default=30
+        COBYLA iterations for the KTA_reg optimization. Kept low for the
+        same reason as `QK-SVM_trained`'s registry entry: this stage
+        recomputes a full O(n^2) kernel matrix in real circuits on every
+        iteration, far more expensive per step than a plain BCE/MSE
+        evaluation.
+    alpha, alpha_grid : see `QuantumKernelRidgeRegression`.
+
+    Attributes
+    ----------
+    kta_before_, kta_after_ : float
+        Continuous-target KTA on the training fold, before and after
+        optimizing theta.
+    alpha_ : float
+        Alpha selected by the inner sweep on the trained kernel.
+    """
+
+    def __init__(
+        self,
+        executor: QuantumExecutor,
+        n_layers: int = 3,
+        maxiter: int = 30,
+        alpha: float = 0.1,
+        alpha_grid: tuple[float, ...] = (0.01, 0.1, 1.0),
+        random_state: int = RANDOM_SEED,
+    ):
+        self.executor = executor
+        self.n_layers = n_layers
+        self.maxiter = maxiter
+        self.alpha = alpha
+        self.alpha_grid = alpha_grid
+        self.random_state = random_state
+        self._qc = None
+        self._x_params = None
+        self._theta_params = None
+        self._theta_opt = None
+        self._X_train = None
+        self._K_diag_train = None
+        self._krr = None
+        self.alpha_ = alpha
+        self.kta_before_ = None
+        self.kta_after_ = None
+
+    def _kernel_for_theta(self, X: np.ndarray, theta: np.ndarray) -> np.ndarray:
+        qc_bound_theta = self._qc.assign_parameters(dict(zip(self._theta_params, theta)))
+        return _fidelity_kernel_via_backend(self.executor, qc_bound_theta, self._x_params, X, X, symmetric=True)
+
+    def fit(self, X: np.ndarray, y: np.ndarray) -> "TrainedQuantumKernelRidgeRegression":
+        from src.evaluation import continuous_kernel_target_alignment
+
+        X = np.asarray(X, dtype=float)
+        y = np.asarray(y, dtype=float)
+        n_features = X.shape[1]
+        self._qc, self._x_params, self._theta_params = reuploading_layer(n_features, self.n_layers)
+        self._X_train = X
+
+        rng = np.random.RandomState(self.random_state)
+        theta0 = rng.uniform(0, 2 * np.pi, size=len(self._theta_params))
+
+        def neg_kta(theta):
+            K = self._kernel_for_theta(X, theta)
+            return -continuous_kernel_target_alignment(K, y)
+
+        self.kta_before_ = -neg_kta(theta0)
+        res = minimize(neg_kta, theta0, method="COBYLA", options={"maxiter": self.maxiter, "rhobeg": 0.8})
+        self._theta_opt = res.x
+        self.kta_after_ = -neg_kta(self._theta_opt)
+
+        K_train = self._kernel_for_theta(X, self._theta_opt)
+        self._K_diag_train = np.clip(np.diag(K_train), 1e-12, None)
+        K_norm = _normalize_fidelity_kernel(K_train, self._K_diag_train, self._K_diag_train)
+
+        self.alpha_ = _select_alpha_via_inner_loocv(K_norm, y, self.alpha_grid, self.alpha)
+        self._krr = KernelRidge(kernel="precomputed", alpha=self.alpha_)
+        self._krr.fit(K_norm, y)
+        logger.info(
+            "QK-KRR-trained fold fit | KTA_reg=%.4f -> %.4f | alpha=%.3g",
+            self.kta_before_, self.kta_after_, self.alpha_,
+        )
+        return self
+
+    def _kernel_to_train(self, X: np.ndarray) -> np.ndarray:
+        X = np.asarray(X, dtype=float)
+        qc_bound_theta = self._qc.assign_parameters(dict(zip(self._theta_params, self._theta_opt)))
+        K = _fidelity_kernel_via_backend(
+            self.executor, qc_bound_theta, self._x_params, X, self._X_train, symmetric=False
+        )
+        K_self = _fidelity_kernel_via_backend(self.executor, qc_bound_theta, self._x_params, X, X, symmetric=True)
+        diag_test = np.clip(np.diag(K_self), 1e-12, None)
+        return _normalize_fidelity_kernel(K, diag_test, self._K_diag_train)
 
     def predict(self, X: np.ndarray) -> np.ndarray:
         return self._krr.predict(self._kernel_to_train(X))
@@ -913,9 +1000,9 @@ class QCNNRegressor(_MultiObservableRegressorCore):
     `QCNNClassifier`, reused for regression by reading out BOTH surviving
     qubits' <Z> expectation values (instead of thresholding a single
     qubit's P(|1>) into a class) and combining them with a classical Ridge
-    head. This gives the existing QCNN a direct regression counterpart and
-    is the 5th model in this suite: 3 regressors (QK-KRR, VQR, QCNN-R) and
-    2 classifiers (QEC, QCHB) round out the 4 models originally scoped.
+    head. This gives the existing QCNN a direct regression counterpart,
+    rounding out the regression suite to 4 models: QK-KRR, QK-KRR_trained,
+    VQR, and QCNN-R.
 
     Requires exactly `n_qubits` (default 6) input features, same fixed-size
     constraint as `QCNNClassifier` -- run it on the dedicated 6-feature
@@ -934,248 +1021,6 @@ class QCNNRegressor(_MultiObservableRegressorCore):
         return qc, x, theta, final_qubits
 
 
-# --- 7. Quantum Ensemble Classifier -------------------------------------------
-
-class QuantumEnsembleClassifier:
-    """QEC: a weighted-vote ensemble of 3 `QuantumKernelSVM` members, one
-    per feature map (angle, entangled, zz). Different encodings induce
-    different kernel geometries in the same Hilbert space; on a 29-sample
-    dataset no single encoding is optimal for every drug, so the ensemble
-    captures complementary structure that any one member misses.
-
-    Adaptive weighting (the ensemble's key idea): each member's vote weight
-    is proportional to its Kernel Target Alignment (KTA), computed on the
-    TRAINING fold only (never the held-out LOOCV sample), softmax'd with a
-    temperature to sharpen the differences between members:
-        w_k = softmax(KTA_k / temperature)
-
-    Final prediction is soft voting: P(y=1) = sum_k(w_k * P_k(y=1)),
-    y_hat = 1[P(y=1) >= 0.5].
-
-    Parameters
-    ----------
-    executor : QuantumExecutor
-    C : float, default=1.0
-        SVC regularization, shared by every member.
-    kta_temperature : float, default=0.5
-        Softmax temperature; lower values weight the best-KTA member(s)
-        more heavily, higher values move the ensemble toward a plain
-        average.
-
-    Attributes
-    ----------
-    ktas_ : list[float]
-        Centered KTA of each member's training kernel, in member order
-        (angle, entangled, zz).
-
-    Notes
-    -----
-    Each member's circuits have the SAME width (n_features qubits) but
-    different depths/entanglement, so in principle they could share a
-    Sampler job -- SamplerV2 does allow heterogeneous circuits of equal
-    qubit count in one job. This implementation still fits members
-    sequentially (`QuantumKernelSVM.fit` per member, one Sampler job per
-    member's kernel matrix) rather than merging their circuit lists into a
-    single job, keeping each member's kernel-computation code path
-    identical to standalone `QuantumKernelSVM` -- simpler to reason about
-    and to unit-test than a merged, index-tracked batch across three
-    different circuit shapes.
-    """
-
-    _MEMBER_SPECS: list[tuple[str, dict]] = [
-        ("angle", {"entangle": True}),
-        ("entangled", {"reps": 3}),
-        ("zz", {"reps": 2}),
-    ]
-
-    def __init__(self, executor: QuantumExecutor, C: float = 1.0, kta_temperature: float = 0.5):
-        self.executor = executor
-        self.C = C
-        self.kta_temperature = kta_temperature
-        self._members: list[QuantumKernelSVM] = []
-        self._weights: np.ndarray | None = None
-        self.ktas_: list[float] = []
-
-    @staticmethod
-    def _compute_kta_weight(K_train: np.ndarray, y_train: np.ndarray) -> float:
-        """Centered Kernel-Target Alignment (Cortes et al., 2012):
-        KTA(K_c, y) with K_c = K - (1/n) K 11^T - (1/n) 11^T K + (1/n^2) sum(K) 11^T,
-        which is more robust than the raw (uncentered) KTA to a kernel with
-        a large constant offset (e.g. every fidelity sitting near 1).
-        Clipped at 0 since KTA can go slightly negative under finite-shot
-        noise even though the population quantity is >= 0 for PSD kernels.
-        """
-        from src.evaluation import kernel_target_alignment
-
-        n = K_train.shape[0]
-        ones_over_n = np.full((n, n), 1.0 / n)
-        K_c = K_train - ones_over_n @ K_train - K_train @ ones_over_n + ones_over_n @ K_train @ ones_over_n
-        return max(kernel_target_alignment(K_c, y_train), 0.0)
-
-    def fit(self, X: np.ndarray, y: np.ndarray) -> "QuantumEnsembleClassifier":
-        X = np.asarray(X, dtype=float)
-        y = np.asarray(y, dtype=float)
-        self._members = []
-        self.ktas_ = []
-
-        for fm_name, fm_kwargs in self._MEMBER_SPECS:
-            member = QuantumKernelSVM(
-                executor=self.executor, feature_map_name=fm_name, feature_map_kwargs=fm_kwargs, C=self.C,
-            )
-            member.fit(X, y)  # computes+caches its own K_train once, in its own Sampler job
-            kta = self._compute_kta_weight(member._K_train, y)
-            self._members.append(member)
-            self.ktas_.append(kta)
-
-        ktas = np.array(self.ktas_)
-        scaled = ktas / self.kta_temperature
-        exp_scaled = np.exp(scaled - scaled.max())  # subtract max for numerical stability
-        self._weights = exp_scaled / exp_scaled.sum()
-        logger.info(
-            "QEC fold fit | members=%s | KTAs=%s | weights=%s",
-            [name for name, _ in self._MEMBER_SPECS], np.round(ktas, 4), np.round(self._weights, 4),
-        )
-        return self
-
-    def predict_proba(self, X: np.ndarray) -> np.ndarray:
-        member_probs = np.array([member.predict_proba(X)[:, 1] for member in self._members])  # (3, n_samples)
-        p1 = self._weights @ member_probs
-        return np.column_stack([1 - p1, p1])
-
-    def predict(self, X: np.ndarray) -> np.ndarray:
-        return (self.predict_proba(X)[:, 1] >= 0.5).astype(int)
-
-
-# --- 8. Quantum-Classical Hybrid Boosting -------------------------------------
-
-class QuantumClassicalHybridBoosting:
-    """QCHB: AdaBoost (SAMME.R-style, real-valued weak-learner outputs)
-    with `DataReuploadingClassifier` instances as weak learners. Each round
-    trains on the sample weights accumulated from the previous rounds'
-    mistakes -- boosting applied to a quantum weak learner rather than a
-    classical decision stump.
-
-    Algorithm
-    ---------
-    w_i <- 1/N for i = 1..N. For t = 1..n_rounds:
-      1. Fit `DataReuploadingClassifier_t` on `(X, y, sample_weight=w)`
-         (weighted BCE loss, see `_bce_loss`).
-      2. p_t(x_i) = P_t(y=1 | x_i); y_hat_i = 1[p_t(x_i) >= 0.5].
-      3. eps_t = sum_i(w_i * 1[y_hat_i != y_i]) / sum(w_i), clipped to
-         [1e-6, 1 - 1e-6] to keep step 4 finite.
-      4. alpha_t = 0.5 * log((1 - eps_t) / eps_t)   (learner weight).
-      5. w_i <- w_i * exp(-alpha_t * (2y_i - 1) * (2p_t(x_i) - 1)); renormalize.
-
-    Prediction: F(x) = sum_t(alpha_t * (2p_t(x) - 1)), y_hat = 1[F(x) > 0].
-
-    Why boosting a quantum weak learner: each `DataReuploadingClassifier`
-    round has few parameters (`n_layers=2` => modest capacity) and is
-    individually regularized against overfitting a 28-sample training fold.
-    AdaBoost's guarantee (Freund & Schapire, 1997) is that boosting any
-    weak learner slightly better than chance drives training error toward 0
-    at an exponential rate in the number of rounds -- so a handful of
-    small, well-regularized quantum rounds can reach the representational
-    capacity of one much larger (and harder to train under LOOCV) circuit,
-    without needing more qubits or a deeper single ansatz.
-
-    Parameters
-    ----------
-    executor : QuantumExecutor
-    n_rounds : int, default=3
-    n_layers : int, default=2
-        `DataReuploadingClassifier` depth per round.
-    maxiter : int, default=60
-        COBYLA iterations per round.
-    random_state : int
-        Each round uses `random_state + t` so consecutive rounds don't
-        share identical parameter initializations.
-
-    Attributes
-    ----------
-    alphas_ : list[float]
-        Learner weight for each round, in round order.
-    round_errors_ : list[float]
-        Weighted error `eps_t` for each round, in round order.
-    """
-
-    def __init__(
-        self,
-        executor: QuantumExecutor,
-        n_rounds: int = 3,
-        n_layers: int = 2,
-        maxiter: int = 60,
-        random_state: int = RANDOM_SEED,
-    ):
-        self.executor = executor
-        self.n_rounds = n_rounds
-        self.n_layers = n_layers
-        self.maxiter = maxiter
-        self.random_state = random_state
-        self._classifiers: list[DataReuploadingClassifier] = []
-        self.alphas_: list[float] = []
-        self.round_errors_: list[float] = []
-
-    def fit(self, X: np.ndarray, y: np.ndarray) -> "QuantumClassicalHybridBoosting":
-        X = np.asarray(X, dtype=float)
-        y = np.asarray(y, dtype=float)
-        n = len(y)
-        w = np.full(n, 1.0 / n)
-        y_pm = 2 * y - 1  # {0,1} -> {-1,+1}
-
-        self._classifiers = []
-        self.alphas_ = []
-        self.round_errors_ = []
-
-        for t in range(self.n_rounds):
-            clf = DataReuploadingClassifier(
-                executor=self.executor, n_layers=self.n_layers, optimizer="cobyla",
-                maxiter=self.maxiter, random_state=self.random_state + t,
-            )
-            clf.fit(X, y, sample_weight=w)
-            p_t = clf.predict_proba(X)[:, 1]
-            y_hat = (p_t >= 0.5).astype(float)
-
-            eps_t = float(np.clip(np.sum(w * (y_hat != y)) / np.sum(w), 1e-6, 1 - 1e-6))
-            # A round with eps_t >= 0.5 (worse than chance under the CURRENT
-            # weights) would otherwise get alpha_t <= 0 and invert that
-            # round's vote -- valid in classical multi-round AdaBoost, but
-            # with only n_rounds=3 total, one inverted/zeroed round throws
-            # away a third of the ensemble's capacity. Floor alpha_t at a
-            # small positive value instead, so every round still casts a
-            # (small) positive vote.
-            alpha_t = max(0.5 * np.log((1 - eps_t) / eps_t), 1e-3)
-
-            f_t = 2 * p_t - 1  # {0,1}-probability -> [-1,1] margin
-            w = w * np.exp(-alpha_t * y_pm * f_t)
-            w = w / w.sum()
-
-            self._classifiers.append(clf)
-            self.alphas_.append(float(alpha_t))
-            self.round_errors_.append(eps_t)
-            logger.info("QCHB round %d/%d | eps=%.4f alpha=%.4f", t + 1, self.n_rounds, eps_t, alpha_t)
-        return self
-
-    def decision_function(self, X: np.ndarray) -> np.ndarray:
-        """Continuous boosted score F(x) = sum_t(alpha_t * (2*p_t(x) - 1))."""
-        X = np.asarray(X, dtype=float)
-        scores = np.zeros(len(X))
-        for clf, alpha_t in zip(self._classifiers, self.alphas_):
-            p_t = clf.predict_proba(X)[:, 1]
-            scores += alpha_t * (2 * p_t - 1)
-        return scores
-
-    def predict_proba(self, X: np.ndarray) -> np.ndarray:
-        """P(y=1) = sigmoid(F(x)) -- calibrates the unbounded boosted score
-        into a probability for consistency with every other classifier here.
-        """
-        scores = self.decision_function(X)
-        p1 = 1 / (1 + np.exp(-scores))
-        return np.column_stack([1 - p1, p1])
-
-    def predict(self, X: np.ndarray) -> np.ndarray:
-        return (self.decision_function(X) > 0).astype(int)
-
-
 # Each model builder takes the shared QuantumExecutor (resolved once per
 # suite run) and returns a fresh, unfitted model. This is called once per
 # LOOCV fold.
@@ -1190,7 +1035,6 @@ class QuantumClassicalHybridBoosting:
 # of letting each model's result be independent evidence.
 QUANTUM_MODEL_BUILDERS = {
     "QK-SVM_angle": lambda executor: QuantumKernelSVM(executor=executor, feature_map_name="angle"),
-    "QK-SVM_zz": lambda executor: QuantumKernelSVM(executor=executor, feature_map_name="zz"),
     # maxiter is set lower here than the class default of 60. The trained
     # kernel model recomputes a full kernel matrix on every COBYLA
     # iteration, which costs far more real circuit executions per step
@@ -1206,19 +1050,8 @@ QUANTUM_MODEL_BUILDERS = {
     "VQC": lambda executor: VariationalQuantumClassifier(
         executor=executor, n_layers=2, optimizer="cobyla", maxiter=60, random_state=RANDOM_SEED + 2
     ),
-    "DataReuploading": lambda executor: DataReuploadingClassifier(
-        executor=executor, n_layers=3, optimizer="cobyla", maxiter=60, random_state=RANDOM_SEED + 3
-    ),
     "QCNN": lambda executor: QCNNClassifier(
         executor=executor, n_qubits=6, optimizer="cobyla", maxiter=80, random_state=RANDOM_SEED + 4
-    ),
-    "QEC_ensemble": lambda executor: QuantumEnsembleClassifier(executor=executor, C=1.0, kta_temperature=0.5),
-    # random_state=RANDOM_SEED+5 here means round t uses RANDOM_SEED+5+t
-    # internally (see QuantumClassicalHybridBoosting.fit), so its first
-    # round no longer starts from the exact same seed as standalone VQC/
-    # DataReuploading above.
-    "QCHB_boosting": lambda executor: QuantumClassicalHybridBoosting(
-        executor=executor, n_rounds=3, n_layers=2, maxiter=60, random_state=RANDOM_SEED + 5
     ),
 }
 
@@ -1250,11 +1083,33 @@ QUANTUM_REGRESSION_MODEL_BUILDERS = {
     "QK-KRR_angle": lambda executor: QuantumKernelRidgeRegression(
         executor=executor, feature_map_name="angle", alpha=1.0, alpha_grid=(0.1, 1.0, 10.0, 100.0),
     ),
+    # n_layers=1 is the optimal depth for this dataset's regime, not just a
+    # cautious default: `regression_ansatz` has n_layers * n_qubits * 3 +
+    # n_output_qubits parameters, so on a 4-qubit MANUAL_FEATURES set with
+    # n_output_qubits=3, n_layers=1/2/3 give 15/27/39 trainable parameters
+    # against only 28 LOOCV training samples per fold -- n_layers=2 is
+    # already borderline (27 params ~ 28 samples) and n_layers=3 clearly
+    # over-parameterized. Confirmed empirically at n_layers=1: a full real
+    # 29-fold LOOCV run (log-target, aer_simulator, this exact maxiter
+    # config) measured q2_loocv=0.60, r2_train=0.86 -- a healthy
+    # generalization gap, not the collapse an over-parameterized fit would
+    # show. n_layers=2/3 were not independently re-run under the same full
+    # LOOCV budget (an exhaustive sweep like TrainedQuantumKernelSVM's
+    # n_layers=1-5 classification study would cost several full 29-fold
+    # LOOCV runs here), so this is the parameter-budget argument plus one
+    # confirmed real result, not an exhaustive multi-value comparison.
     "VQR_spsa_cobyla": lambda executor: VariationalQuantumRegressor(
         executor=executor, n_layers=1, n_output_qubits=3, maxiter_spsa=50, maxiter_cobyla=20
     ),
     "QCNN-R": lambda executor: QCNNRegressor(
         executor=executor, n_qubits=6, maxiter_spsa=50, maxiter_cobyla=20
+    ),
+    # n_layers=3 kept unchanged from TrainedQuantumKernelSVM's own sweep
+    # (see TrainedQuantumKernelRidgeRegression's docstring) rather than
+    # independently re-swept for regression; maxiter=30 for the same
+    # per-iteration-cost tradeoff as QK-SVM_trained above.
+    "QK-KRR_trained": lambda executor: TrainedQuantumKernelRidgeRegression(
+        executor=executor, n_layers=3, maxiter=30
     ),
 }
 

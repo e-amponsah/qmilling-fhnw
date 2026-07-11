@@ -1377,3 +1377,4 @@
 18:57:01 | Running quantum classifier: QK-SVM_trained (backend=aer_simulator)
 18:57:56 | Trained kernel KTA for this fold, before and after training: 0.2208 -> 0.2949
 18:58:52 | Trained kernel KTA for this fold, before and after training: 0.2308 -> 0.3121
+18:59:48 | Trained kernel KTA for this fold, before and after training: 0.2161 -> 0.3032

@@ -56,7 +56,7 @@ from src.config import (
     RESULTS_DIR,
 )
 from src.data_fetching import load_or_fetch_smiles
-from src.evaluation import kernel_target_alignment, save_results_table, summarize_results
+from src.evaluation import kernel_target_alignment, save_results_json, save_results_table, summarize_results
 from src.features import (
     build_descriptor_table,
     build_modeling_table,
@@ -297,6 +297,7 @@ def stage_classical_classification(data: pd.DataFrame, selection: dict) -> dict:
     clf_results = run_classical_classification_suite(X, y_clf)
     clf_table = summarize_results(clf_results, kind="classification")
     save_results_table(clf_table, "classical_loocv.csv")
+    save_results_json(clf_results, kind="classification")
     logger.info("Classical LOOCV results:\n%s", clf_table.to_string())
     return clf_results
 
@@ -322,6 +323,7 @@ def stage_classical_regression(data: pd.DataFrame, selection: dict) -> dict:
         "n_folds": pls_result["metrics"]["n_folds"],
     }])
     save_results_table(pls_table, "pls_regression_loocv.csv")
+    save_results_json({"PLS_regression": pls_result}, kind="regression")
     logger.info(
         "PLS regression LOOCV: Q2=%.3f (Patzmann benchmark Q2=%.2f), R2(train)=%.3f (Patzmann R2=0.82)",
         pls_result["metrics"]["q2_loocv"], PATZMANN_Q2_BENCHMARK, pls_result["metrics"]["r2_train"],
@@ -473,6 +475,7 @@ def stage_quantum_classification(
 
     q_table = summarize_results(quantum_results, kind="classification")
     save_results_table(q_table, "quantum_loocv.csv")
+    save_results_json(quantum_results, kind="classification")
     logger.info("Quantum LOOCV results (backend=%s):\n%s", execution_config.label(), q_table.to_string())
 
     # Plot each drug's predicted score against its true COMDR_15min, using the best quantum model.
@@ -516,6 +519,7 @@ def stage_quantum_regression(
 
     reg_table = summarize_results(quantum_regression_results, kind="regression")
     save_results_table(reg_table, "quantum_regression_loocv.csv")
+    save_results_json(quantum_regression_results, kind="regression")
     logger.info(
         "Quantum regression LOOCV results (backend=%s, Patzmann Q2 benchmark=%.2f):\n%s",
         execution_config.label(), PATZMANN_Q2_BENCHMARK, reg_table.to_string(),

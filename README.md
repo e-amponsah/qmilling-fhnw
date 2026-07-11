@@ -329,6 +329,93 @@ the achievable accuracy at a fraction of the cost). Construct
 `TrainedQuantumKernelSVM(executor, n_layers=3, maxiter=60)` directly for the full 96.6% result if
 you can afford the wait, or use `--max-samples` for a bounded check first.
 
+## Unified Comparison and Interpretation (Task 5)
+
+Full results: `data/results/unified_comparison_table.csv` (one row per model, classification and
+regression kept in separate blocks since their metrics are not comparable — see below), generated
+by `python main.py --stage quantum` / `--stage classical` and exported per-model as
+`data/results/<model>.json` by `src.evaluation.save_results_json`. Figures:
+`plots/comparison/classification_comparison.png`, `regression_comparison.png`,
+`per_drug_regression_scatter.png`, `per_drug_classification_heatmap.png`
+(`scripts/plot_model_comparison.py`). All numbers below are real 29-fold LOOCV runs on
+`aer_simulator`, the 4-feature Patzmann-approx set (`MANUAL_FEATURES`), unless marked otherwise.
+
+**Do quantum models match, exceed, or fall short of the classical baselines?** Both, depending on
+the task. For **classification**, the best quantum model wins outright: `QK-SVM_trained` reaches
+96.6% accuracy / F1=0.960, above the best classical model (`GradientBoosting`, 93.1% / F1=0.923).
+It is not a uniform win, though — `VQC` and `QCNN` (86.2% each) sit below both classical tree
+ensembles. For **regression**, quantum currently falls short across the board: the best quantum
+regressor (`VQR`, Q²=0.600) does not reach the classical PLS baseline (Q²=0.756) run on the exact
+same 4 features.
+
+**Comparison to the Pätzmann benchmark, and translating between R²/Q² and accuracy.** PLS on this
+project's 4-feature set reaches Q²=0.756, closely reproducing Pätzmann et al.'s published Q²=0.77
+on the same four physicochemical variables — a useful sanity check on the whole pipeline before
+trusting the quantum numbers. The best quantum regressor (VQR, Q²=0.600) falls short of both. As
+the brief notes explicitly, **R² and accuracy are not the same quantity and cannot be read off
+against each other directly**: Q²/R² measure the fraction of COMDR15's variance explained on a
+continuous scale, while accuracy measures the fraction of correct calls *after* thresholding at
+COMDR15=2.0. A regressor can have a modest Q² yet still support a high classification accuracy if
+most of its errors stay on the correct side of that threshold — which is visibly the case here (see
+`per_drug_regression_scatter.png`: most red/green points differ from the diagonal by varying
+amounts but rarely cross the threshold lines). Concretely, `QK-SVM_trained`'s 96.6% classification
+accuracy says nothing about how a regression version of the same encoding would score on Q² — they
+are different models solving different reformulations of the same problem, which is exactly why
+this project keeps the classification family (QK-SVM/VQC/QCNN) and the regression family
+(QK-KRR/VQR/QCNN-R) as separate, independently evaluated model sets rather than deriving one from
+the other.
+
+**Which drugs are hardest to predict, and what do they share chemically?** `Etoricoxib`
+(COMDR15=2.31) is misclassified by **all 7** classification models, classical and quantum alike —
+it sits almost exactly on the COMDR15=2.0 decision boundary, so essentially any model's LOOCV score
+has close to even odds of landing on the wrong side regardless of paradigm; see the near-solid red
+column at the Responder/Non-Responder boundary in `per_drug_classification_heatmap.png`. For
+regression, `Aripiprazole` is the hardest case by a wide margin (mean absolute error 11.1, ≈160%
+relative error) despite being correctly *classified* by every model — every regressor
+systematically over-predicts it (~14-18 vs. a true 6.97). `Ceritinib`, the next-hardest regression
+case, shares its profile: both have an above-median particle size (D50 = 185.98 µm and 72.51 µm)
+combined with high lipophilicity (MolLogP = 4.86 and 6.36). Since D50 is the single strongest
+Pätzmann predictor, a large-D50, lipophilic drug "should" be easy to place — the fact that these two
+specifically are not suggests COMDR15's response here is driven by something none of the four
+features capture (crystal habit, or a specific PVP-drug interaction), rather than a generic
+under-fitting problem.
+
+**Did the feature set (4 Pätzmann features vs. a broader 6-feature RDKit set) matter differently for
+classical vs. quantum models?** Yes, substantially. Re-running the full suite on
+`MANUAL_FEATURES_QCNN`'s 6-feature set (the 4 Pätzmann variables plus `FractionCSP3` and `BertzCT`)
+and comparing to the 4-feature results (`data/results/feature_set_comparison.csv`):
+
+| Model | Paradigm | 4 features | 6 features | Δ |
+|---|---|---|---|---|
+| GradientBoosting | classical | 0.931 | 0.897 | −0.034 |
+| RandomForest | classical | 0.897 | 0.897 | 0.000 |
+| SVC_rbf | classical | 0.862 | 0.897 | +0.034 |
+| PLS (Q²) | classical | 0.756 | 0.740 | −0.016 |
+| QK-SVM_angle | quantum | 0.931 | 0.897 | −0.034 |
+| VQC | quantum | 0.862 | 0.897 | +0.034 |
+| **QK-SVM_trained** | quantum | **0.966** | **0.793** | **−0.172** |
+| **QK-KRR_angle (Q²)** | quantum | **0.365** | **0.192** | **−0.172** |
+| VQR (Q²) | quantum | 0.600 | 0.576 | −0.024 |
+
+Classical models barely move either way (≤0.034). Among the quantum models the split is not simply
+"trained vs. fixed" — `QK-KRR_angle` uses the exact same *fixed*, untrained angle encoding as
+`QK-SVM_angle`, yet it drops just as hard (−0.172) as the genuinely trained `QK-SVM_trained`
+(−0.172), while `QK-SVM_angle` itself barely moves (+0.034), same as classical. The variable that
+actually separates the stable quantum models from the collapsing ones is **kernel-based regression
+vs. everything else**: `QK-SVM_trained` and `QK-KRR_angle` are both fidelity-kernel models feeding a
+classical head (`SVC` / `KernelRidge`), and going 4→6 qubits doubles the induced Hilbert space
+(16→64 dimensions) against the same 28 training samples, concentrating off-diagonal fidelities
+toward a smaller, less informative range (the same effect already documented for `QK-KRR`'s
+feature-map choice above). `SVC` only needs that concentrated kernel to preserve enough relative
+ordering to threshold correctly — a coarse, binary decision — so `QK-SVM_angle` tolerates the extra
+qubits fine. `KernelRidge` instead interpolates a *continuous* value directly from kernel
+magnitudes, so `QK-KRR_angle` takes the same hit as `QK-SVM_trained`, without needing any trained
+kernel weights to explain it. The variational, non-kernel models (`VQC`, `VQR`) sit in between and
+close to classical (+0.034, −0.024) regardless of task. **Answer: feature set choice matters far
+more for quantum models than classical ones, but the deciding factor is whether the model is a
+*fidelity-kernel regressor* specifically, not whether the encoding happens to have trainable
+weights.**
+
 ## Evaluation methodology and leakage guarantees
 
 - Full 29-fold leave-one-out cross validation for every model (`src/evaluation.py`).

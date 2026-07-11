@@ -8,8 +8,10 @@ model in classical_models.py and quantum_models.py runs through, so this rule ho
 for the whole project, not just some models.
 """
 
+import json
 import logging
 import time
+from pathlib import Path
 from typing import Callable, Protocol
 
 import numpy as np
@@ -166,6 +168,90 @@ def save_results_table(df: pd.DataFrame, filename: str) -> None:
     out_path = RESULTS_DIR / filename
     df.to_csv(out_path, index=False)
     logger.info("Saved %s", out_path)
+
+
+def _normalize_classification_result(res: dict) -> dict:
+    """loocv_evaluate() output -> the {"metrics", "predictions", "targets",
+    "scores"} schema scripts/plot_model_comparison.py expects: renames
+    recall_class0/recall_class1 to recall_0/recall_1, and y_true/y_pred/y_proba
+    to targets/predictions/scores.
+    """
+    m = res["metrics"]
+    metrics = {
+        "accuracy": m["accuracy"],
+        "f1": m["f1"],
+        "recall_0": m["recall_class0"],
+        "recall_1": m["recall_class1"],
+        "elapsed_s": m.get("elapsed_s"),
+    }
+    return {
+        "metrics": metrics,
+        "predictions": list(np.asarray(res["y_pred"]).tolist()),
+        "targets": list(np.asarray(res["y_true"]).tolist()),
+        "scores": list(np.asarray(res["y_proba"]).tolist()),
+    }
+
+
+def _normalize_regression_result(res: dict) -> dict:
+    """Normalizes either of this project's two regression result shapes into
+    the {"metrics", "predictions", "targets", "scores"} schema:
+    - run_quantum_regression_suite() output already has predictions/targets/
+      scores on the raw COMDR15 scale and r2/q2/mae/rmse metrics -- passed
+      through as-is (aside from dropping the extra target_scale/n_folds keys).
+    - loocv_evaluate_regression() output (e.g. the PLS baseline) has
+      y_true/y_pred and q2_loocv/r2_train instead; if fit on log(COMDR15)
+      (metrics["target_scale"] starts with "log"), y_true/y_pred are
+      exponentiated back to the raw scale before mae/rmse are computed, so
+      every regressor's JSON is comparable in the same physical units.
+    """
+    m = res["metrics"]
+    if "predictions" in res and "targets" in res:
+        metrics = {"r2": m["r2"], "q2": m["q2"], "mae": m["mae"], "rmse": m["rmse"], "elapsed_s": m.get("elapsed_s")}
+        return {
+            "metrics": metrics,
+            "predictions": list(np.asarray(res["predictions"]).tolist()),
+            "targets": list(np.asarray(res["targets"]).tolist()),
+            "scores": list(np.asarray(res["scores"]).tolist()),
+        }
+
+    y_true = np.asarray(res["y_true"], dtype=float)
+    y_pred = np.asarray(res["y_pred"], dtype=float)
+    if str(m.get("target_scale", "")).startswith("log"):
+        y_true, y_pred = np.exp(y_true), np.exp(y_pred)
+    mae = float(np.mean(np.abs(y_true - y_pred)))
+    rmse = float(np.sqrt(np.mean((y_true - y_pred) ** 2)))
+    metrics = {"r2": m["r2_train"], "q2": m["q2_loocv"], "mae": mae, "rmse": rmse, "elapsed_s": m.get("elapsed_s")}
+    return {
+        "metrics": metrics,
+        "predictions": y_pred.tolist(),
+        "targets": y_true.tolist(),
+        "scores": y_pred.tolist(),
+    }
+
+
+def save_results_json(results_by_model: dict[str, dict], kind: str, results_dir: str | Path | None = None) -> None:
+    """Write one normalized JSON file per model (`<model_name>.json`), the
+    format scripts/plot_model_comparison.py's `load_results` reads.
+
+    Parameters
+    ----------
+    results_by_model : dict
+        {model_name: loocv_evaluate()/loocv_evaluate_regression()/
+        run_quantum_regression_suite() output}.
+    kind : {"classification", "regression"}
+    results_dir : str or Path, optional
+        Defaults to `RESULTS_DIR` (data/results/).
+    """
+    out_dir = Path(results_dir) if results_dir is not None else RESULTS_DIR
+    out_dir.mkdir(parents=True, exist_ok=True)
+    normalize = _normalize_classification_result if kind == "classification" else _normalize_regression_result
+
+    for name, res in results_by_model.items():
+        payload = normalize(res)
+        out_path = out_dir / f"{name.replace('/', '_')}.json"
+        with open(out_path, "w") as f:
+            json.dump(payload, f, indent=2)
+        logger.info("Saved %s", out_path)
 
 
 def _self_test_leakage_guard() -> None:

@@ -1483,3 +1483,5 @@
 20:23:54 | === QCNN-R regression (fixed 6-qubit, set B) ===
 20:23:54 | QuantumExecutor ready | backend=aer_simulator | shots=4096
 20:23:54 | Running quantum regressor: QCNN-R (backend=aer_simulator, target=log(COMDR_15min))
+20:31:25 |   QCNN-R -> q2=0.513 r2=0.807 mae=2.633 rmse=5.507 (436.0s)
+20:31:25 | ALL DONE. Results at /Users/goni/OQI-Hackathon-2026----FNHW-/data/results/unified_run/unified_results_final.pkl

@@ -1,24 +1,28 @@
-"""Real circuit execution layer: every quantum computation in this project
-(kernel fidelities, variational-model expectation values) is submitted as an
-actual `SamplerV2` job -- transpiled to a backend's ISA and run with finite
-shots -- never a shortcut linear-algebra simulation. The only thing that
-changes between "local" and "on IBM hardware" is which `Backend` object the
-Sampler is pointed at.
+"""This is the layer that actually runs quantum circuits.
 
-Toggle via `ExecutionConfig.mode`:
-    "aer_simulator" : local, noiseless AerSimulator (default -- fast, free).
-    "aer_noisy"     : local AerSimulator loaded with a device-like noise model.
-    "ibm_runtime"   : a real (or cloud-simulated) backend via
-                       `QiskitRuntimeService`, using the account saved by
-                       `scripts/setup_ibm_account.py`.
+Every quantum computation in this project, whether it is a kernel fidelity
+or a variational model's prediction, goes through a real SamplerV2 job:
+transpiled to the target backend and run with a finite number of shots.
+Nothing in this project computes an exact result with linear algebra as a
+shortcut. The only difference between running locally and running on IBM
+hardware is which backend object the Sampler points at.
 
-Every quantum model class in `quantum_models.py` takes an `ExecutionConfig`
-and is otherwise agnostic to where its circuits actually run.
+Pick the target with ExecutionConfig.mode:
+    "aer_simulator"  local, noiseless AerSimulator. This is the default,
+                     and it is fast and free.
+    "aer_noisy"      local AerSimulator loaded with a noise model that
+                     approximates a real device.
+    "ibm_runtime"    a real (or cloud hosted) IBM backend, reached through
+                     QiskitRuntimeService using the account saved by
+                     scripts/setup_ibm_account.py.
+
+Every quantum model class in quantum_models.py takes an ExecutionConfig and
+does not otherwise need to know where its circuits are actually running.
 """
 
 import logging
 import os
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 import numpy as np
 from qiskit import QuantumCircuit
@@ -35,10 +39,11 @@ logger = logging.getLogger(__name__)
 def build_device_like_noise_model(
     single_qubit_error: float = 1e-3, two_qubit_error: float = 1e-2, readout_error: float = 0.02
 ) -> NoiseModel:
-    """A synthetic but realistic near-term-hardware noise model: depolarizing
-    error on single-/two-qubit gates plus symmetric readout error, in the
-    ballpark of current superconducting-qubit device calibration reports.
-    Used for `mode="aer_noisy"` when no live IBM backend is configured.
+    """Build a noise model that approximates a real superconducting device:
+    depolarizing error on single and two qubit gates plus a symmetric
+    readout error, at levels typical of current hardware calibration
+    reports. Used for mode="aer_noisy" when there is no live IBM backend
+    configured.
     """
     noise_model = NoiseModel(basis_gates=["u", "cx"])
     noise_model.add_all_qubit_quantum_error(depolarizing_error(single_qubit_error, 1), ["u"])
@@ -50,14 +55,14 @@ def build_device_like_noise_model(
 
 @dataclass
 class ExecutionConfig:
-    """Everything needed to route a batch of circuits to an actual backend."""
+    """Everything needed to point a batch of circuits at a real backend."""
 
-    mode: str = "aer_simulator"  # "aer_simulator" | "aer_noisy" | "ibm_runtime"
+    mode: str = "aer_simulator"  # one of: aer_simulator, aer_noisy, ibm_runtime
     shots: int = 4096
     optimization_level: int = 1
     seed: int = RANDOM_SEED
-    ibm_backend_name: str | None = None  # None -> least-busy operational backend
-    noise_model: NoiseModel | None = None  # override for "aer_noisy"; else built lazily
+    ibm_backend_name: str | None = None  # if not set, picks the least busy backend
+    noise_model: NoiseModel | None = None  # override for aer_noisy, otherwise built automatically
 
     def label(self) -> str:
         if self.mode == "ibm_runtime":
@@ -66,10 +71,9 @@ class ExecutionConfig:
 
 
 def default_execution_config() -> ExecutionConfig:
-    """Reads QC_BACKEND_MODE / QC_SHOTS / QC_IBM_BACKEND from the environment
-    so the execution target can be toggled without touching code (e.g. a
-    `.env` file loaded by `scripts/setup_ibm_account.py`, or an inline
-    `QC_BACKEND_MODE=ibm_runtime python main.py ...`).
+    """Build an ExecutionConfig from environment variables (QC_BACKEND_MODE,
+    QC_SHOTS, QC_IBM_BACKEND), so the execution target can be changed from
+    .env or the shell without touching any code.
     """
     mode = os.environ.get("QC_BACKEND_MODE", "aer_simulator")
     shots = int(os.environ.get("QC_SHOTS", "4096"))
@@ -78,10 +82,12 @@ def default_execution_config() -> ExecutionConfig:
 
 
 class QuantumExecutor:
-    """Resolves an `ExecutionConfig` to a live backend + Sampler once, then
-    runs batches of circuits against it. One instance should be reused across
-    an entire LOOCV run (or at least a full fold) to avoid re-resolving the
-    IBM Runtime service / re-picking a least-busy backend on every call.
+    """Resolves an ExecutionConfig to a live backend and Sampler once, then
+    runs batches of circuits against it. One instance should be reused for
+    an entire LOOCV run, or at least a full fold, instead of being
+    recreated for every call. Recreating it would mean reconnecting to
+    IBM Runtime and picking a new least busy backend every time, which is
+    both slow and unnecessary.
     """
 
     def __init__(self, config: ExecutionConfig | None = None):
@@ -109,11 +115,14 @@ class QuantumExecutor:
         raise ValueError(f"Unknown ExecutionConfig.mode: {self.config.mode}")
 
     def run_counts_batch(self, circuits: list[QuantumCircuit]) -> list[dict[str, int]]:
-        """Transpile + submit every circuit as ONE Sampler job, return a list
-        of measurement-count dicts (bitstring -> count) in input order.
-        Batching every circuit needed for a LOOCV fold (or a full kernel
-        matrix) into a single job is what makes real hardware/cloud queue
-        execution remotely practical instead of one-job-per-circuit.
+        """Transpile and submit every circuit in one Sampler job, then
+        return a list of measurement count dictionaries in the same order
+        as the input circuits.
+
+        Batching all the circuits needed for one LOOCV fold, or one full
+        kernel matrix, into a single job is what makes running on a real
+        or cloud queued backend practical. Submitting one job per circuit
+        would be far too slow.
         """
         if not circuits:
             return []
@@ -131,15 +140,17 @@ class QuantumExecutor:
 
 
 def probability_of_one(counts: dict[str, int], qubit: int, shots: int) -> float:
-    """P(qubit == 1) from a Sampler counts dict. Qiskit bitstrings are
-    little-endian (rightmost character = qubit 0).
+    """Estimate P(qubit == 1) from a Sampler counts dictionary. Qiskit
+    bitstrings are little endian, so the rightmost character is qubit 0.
     """
     ones = sum(c for bitstring, c in counts.items() if bitstring[::-1][qubit] == "1")
     return ones / shots
 
 
 def fidelity_from_counts(counts: dict[str, int], num_qubits: int, shots: int) -> float:
-    """Compute-uncompute fidelity estimate: P(measuring the all-zeros string)."""
+    """Estimate fidelity from a compute-uncompute circuit's measurement
+    counts: it is the probability of measuring all zeros.
+    """
     zero_string = "0" * num_qubits
     return counts.get(zero_string, 0) / shots
 
@@ -153,7 +164,11 @@ def build_measurement_circuit(bound_circuit: QuantumCircuit) -> QuantumCircuit:
 def build_compute_uncompute_circuit(
     feature_map: QuantumCircuit, x_params, xi: np.ndarray, xj: np.ndarray
 ) -> QuantumCircuit:
-    """U(xi) then U(xj)^-1 applied to |0>; P(all-zeros) on measurement = fidelity."""
+    """Build the standard compute-uncompute fidelity test circuit: apply
+    U(xi), then the inverse of U(xj), to the all-zero state. The
+    probability of measuring all zeros afterward equals the fidelity
+    between the two encoded states.
+    """
     n = feature_map.num_qubits
     circ = QuantumCircuit(n)
     circ.compose(feature_map.assign_parameters(dict(zip(x_params, xi))), inplace=True)

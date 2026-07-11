@@ -1,7 +1,9 @@
-"""Leakage-free classical baselines, run through the shared LOOCV harness.
+"""Classical baseline models, run through the same LOOCV harness as the
+quantum models so results are directly comparable.
 
-Each factory returns a fresh, unfitted sklearn estimator; `evaluation.py`
-is responsible for fitting/scaling strictly within each LOOCV fold.
+Each function here just builds and returns an unfitted sklearn estimator.
+Fitting and scaling within each LOOCV fold is handled by evaluation.py, not
+by this file.
 """
 
 import logging
@@ -20,9 +22,9 @@ logger = logging.getLogger(__name__)
 # --- Model factories -------------------------------------------------------
 
 def make_svc() -> CalibratedClassifierCV:
-    # SVC(probability=True)'s internal Platt scaling is deprecated as of
-    # sklearn 1.9; CalibratedClassifierCV is the maintainer-recommended
-    # replacement for a probability-calibrated SVC.
+    # sklearn 1.9 deprecated SVC(probability=True)'s internal Platt
+    # scaling. CalibratedClassifierCV is the recommended replacement for
+    # getting calibrated probabilities out of an SVC.
     base = SVC(kernel="rbf", C=1.0, gamma="scale", random_state=RANDOM_SEED)
     return CalibratedClassifierCV(base, method="sigmoid", cv=3, ensemble=False)
 
@@ -47,8 +49,8 @@ CLASSICAL_CLASSIFIERS = {
 
 
 def run_classical_classification_suite(X, y) -> dict:
-    """Run every registered classical classifier through LOOCV; returns
-    {model_name: loocv_evaluate(...) output}.
+    """Run every registered classical classifier through LOOCV and return
+    a dict mapping model name to its loocv_evaluate() output.
     """
     results = {}
     for name, factory in CLASSICAL_CLASSIFIERS.items():
@@ -60,20 +62,19 @@ def run_classical_classification_suite(X, y) -> dict:
 
 
 def run_pls_regression_baseline(X, y_reg, n_components: int = 2, log_target: bool = True) -> dict:
-    """PLS regression baseline for direct comparison against the Patzmann
-    et al. R^2=0.82 / Q^2=0.77 benchmark (regression framing of the same
-    problem).
+    """PLS regression baseline, for comparing against the Patzmann et al.
+    benchmark of R^2 = 0.82 and Q^2 = 0.77.
 
-    Patzmann et al. modeled log(COMDR_15) rather than the raw ratio -- their
-    published benchmark table's target row is literally "LogCOMDR15min".
-    COMDR_15min spans a ~24x range (1.11-26.48) and is heavily right-skewed,
-    so a plain linear PLS fit on the raw ratio is dominated by a handful of
-    extreme high-responder outliers (e.g. Fenofibrate at 26.48) and
-    generalizes poorly under LOOCV with only 29 samples. Log-transforming
-    (default here, matching the benchmark) fixes this: on the
-    Patzmann-approximation feature set (D50, MolLogP, Kappa3,
-    apparent_solubility) this took Q^2 from ~0.45 to ~0.76 and R^2 from
-    ~0.68 to ~0.83 -- in line with their reported 0.77 / 0.82.
+    Patzmann et al. modeled log(COMDR_15) rather than the raw ratio. Their
+    published table's target row is literally named LogCOMDR15min.
+    COMDR_15min ranges from about 1.1 to 26.5 and is heavily skewed, so a
+    plain linear PLS fit on the raw ratio ends up dominated by a few
+    extreme high responders like Fenofibrate and generalizes poorly with
+    only 29 samples. Log transforming the target, which is the default
+    here and matches what the benchmark used, fixes this: it moves Q^2
+    from about 0.45 to about 0.76 and R^2 from about 0.68 to about 0.83 on
+    the Patzmann approximation feature set (D50, MolLogP, Kappa3,
+    apparent_solubility), close to their reported numbers.
     """
     target = np.log(y_reg) if log_target else y_reg
     target_scale = "log(COMDR_15min)" if log_target else "COMDR_15min"

@@ -1,9 +1,9 @@
-"""PubChem REST retrieval of SMILES strings, with fault tolerance and rate limiting.
+"""Fetch SMILES strings from PubChem, with retries and rate limiting.
 
-Looks up each drug name via the PubChem PUG-REST API, preferring the newer
-`ConnectivitySMILES` property and falling back to the legacy `CanonicalSMILES`
-name. A minimum 0.34s pause between requests keeps well under PubChem's
-~5 requests/second guidance.
+Looks up each drug name through the PubChem PUG-REST API. Tries the newer
+ConnectivitySMILES property first and falls back to the older CanonicalSMILES
+name if that fails. Waits at least 0.34 seconds between requests to stay
+under PubChem's guidance of about 5 requests per second.
 """
 
 import logging
@@ -20,7 +20,7 @@ logger = logging.getLogger(__name__)
 PUBCHEM_URL = (
     "https://pubchem.ncbi.nlm.nih.gov/rest/pug/compound/name/{name}/property/{prop}/JSON"
 )
-# New property name first, legacy name as fallback (PubChem renamed this property).
+# PubChem renamed this property, so we try the new name first and the old one second.
 SMILES_PROPERTIES = ["ConnectivitySMILES", "CanonicalSMILES"]
 MIN_REQUEST_INTERVAL_S = 0.34
 REQUEST_TIMEOUT_S = 30
@@ -36,7 +36,7 @@ def fetch_smiles(name: str, session: requests.Session | None = None) -> str | No
             try:
                 r = session.get(url, timeout=REQUEST_TIMEOUT_S)
                 if r.status_code != 200:
-                    break  # property unavailable for this compound -> try fallback property
+                    break  # property not available for this compound, try the fallback
                 props = r.json()["PropertyTable"]["Properties"][0]
                 for key in (prop, "ConnectivitySMILES", "CanonicalSMILES", "SMILES"):
                     if key in props and props[key]:

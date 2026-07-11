@@ -1,4 +1,6 @@
-"""Root execution gate steering the entire OQI Hackathon 2026 QML pipeline.
+"""Entry point for the whole pipeline. Run this to fetch data, build
+features, train the classical and quantum models, and generate every plot
+and results table.
 
 Usage:
     python main.py --stage all
@@ -8,15 +10,17 @@ Usage:
     python main.py --stage quantum
     python main.py --stage bonus
 
-Backend toggle (every quantum circuit is executed for real via a Sampler
-job -- see src/quantum_backend.py -- never a Statevector shortcut):
-    python main.py --backend aer            # local AerSimulator, ideal (default)
-    python main.py --backend aer-noisy       # local AerSimulator + device-like noise
-    python main.py --backend ibm-runtime     # real IBM Quantum backend
-        (requires `python scripts/setup_ibm_account.py` first; see README)
+Every quantum circuit runs for real through a Sampler job (see
+src/quantum_backend.py), never as a Statevector shortcut. Choose where with
+--backend:
+    python main.py --backend aer            local AerSimulator, no noise (default)
+    python main.py --backend aer-noisy       local AerSimulator with a device-like noise model
+    python main.py --backend ibm-runtime     a real IBM Quantum backend
+        (run python scripts/setup_ibm_account.py first, see the README)
 
-    python main.py --backend ibm-runtime --max-samples 8   # cheap smoke test
-        before committing a full 29-fold LOOCV run to a real, queued device.
+    python main.py --backend ibm-runtime --max-samples 8
+        a cheap smoke test to run before committing to a full 29 fold LOOCV
+        run on a real, queued device.
 """
 
 import argparse
@@ -68,9 +72,9 @@ from src.quantum_models import (
 )
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s", datefmt="%H:%M:%S")
-# qiskit's transpiler and qiskit-ibm-runtime's primitive layer both log
-# per-pass / per-job-submission detail at INFO, which drowns out this
-# pipeline's own progress logging; keep them at WARNING.
+# qiskit's transpiler and qiskit-ibm-runtime's primitive layer both log a
+# lot of detail at INFO level, which drowns out this pipeline's own
+# progress messages. Keep those libraries quieter.
 for _noisy_logger in ("qiskit", "qiskit_ibm_runtime", "qiskit_aer", "stevedore"):
     logging.getLogger(_noisy_logger).setLevel(logging.WARNING)
 logger = logging.getLogger(__name__)
@@ -81,9 +85,9 @@ BACKEND_MODE_MAP = {"aer": "aer_simulator", "aer-noisy": "aer_noisy", "ibm-runti
 # --- Plotting helpers ---------------------------------------------------------
 
 def plot_feature_correlation_heatmap(X_full: pd.DataFrame, data: pd.DataFrame) -> None:
-    """Professional, annotated Pearson-correlation heatmap: the full square
-    matrix (every cell, both triangles), diverging colormap centered at 0,
-    per-cell values, and a colorbar.
+    """Draw the Pearson correlation heatmap for every candidate feature
+    plus the target: the full square matrix, a diverging colormap centered
+    at zero, the value printed in every cell, and a colorbar.
     """
     corr_matrix = pd.concat([X_full, data[[REGRESSION_TARGET]]], axis=1).corr()
 
@@ -105,14 +109,14 @@ def plot_feature_correlation_heatmap(X_full: pd.DataFrame, data: pd.DataFrame) -
     ax.set_xticklabels(ax.get_xticklabels(), rotation=45, ha="right", fontsize=9)
     ax.set_yticklabels(ax.get_yticklabels(), rotation=0, fontsize=9)
 
-    # Make the target row/column's tick labels visually distinct (bold).
+    # Bold the target's row and column labels so it stands out.
     for label in ax.get_xticklabels() + ax.get_yticklabels():
         if label.get_text() == REGRESSION_TARGET:
             label.set_fontweight("bold")
 
-    # Per-cell contrast-aware annotation color (white on dark fills, black on
-    # light) -- seaborn always draws annotations in one fixed color otherwise,
-    # which reads poorly at the dark end of a diverging colormap.
+    # Seaborn draws all annotation text in one fixed color by default,
+    # which is hard to read on the dark end of a diverging colormap. Pick
+    # white or black per cell based on how light or dark that cell is.
     cmap = plt.get_cmap("RdBu_r")
     norm = plt.Normalize(vmin=-1, vmax=1)
     for text, value in zip(ax.texts, corr_matrix.values.flatten()):
@@ -126,13 +130,14 @@ def plot_feature_correlation_heatmap(X_full: pd.DataFrame, data: pd.DataFrame) -
 
 
 def plot_pca_diagnostics(X_full: pd.DataFrame, data: pd.DataFrame) -> tuple:
-    """PCA diagnostic suite (Task 1 supplement; see src/pca_analysis.py for
-    why PCA is a diagnostic here, not a feature-reduction step): a scree
-    plot, a PC1-PC2 scatter colored by Responder/Non-Responder, a loadings
-    biplot, and each PC's correlation with the continuous target. Returns
-    (pca, scores, loadings) so the caller can also persist the numeric
-    tables and log the redundancy-cluster summary that guides
-    `features.select_k_best_features`.
+    """Draw the PCA diagnostic plots for Task 1: a scree plot, a PC1 vs PC2
+    scatter colored by Responder or Non-Responder, a loadings biplot, and
+    each component's correlation with the continuous target.
+
+    See pca_analysis.py for why PCA is used as a diagnostic here rather
+    than a feature reduction step. Returns the fitted PCA object, scores,
+    and loadings so the caller can also save the numeric tables and report
+    the redundancy clusters that feed into feature selection.
     """
     pca, scores, loadings = run_pca(X_full)
     pca_dir = PLOTS_DIR / "pca"
@@ -142,7 +147,7 @@ def plot_pca_diagnostics(X_full: pd.DataFrame, data: pd.DataFrame) -> tuple:
     n80 = int(np.argmax(cum >= 80) + 1)
     n95 = int(np.argmax(cum >= 95) + 1)
 
-    # 1. Scree: per-PC variance (bars) + cumulative (line).
+    # 1. Scree plot: variance per component as bars, cumulative variance as a line.
     k = np.arange(1, len(ev) + 1)
     fig, ax1 = plt.subplots(figsize=(7, 4))
     ax1.bar(k, ev, color="#2471a3", alpha=0.85, label="per-PC variance")
@@ -159,7 +164,7 @@ def plot_pca_diagnostics(X_full: pd.DataFrame, data: pd.DataFrame) -> tuple:
     fig.savefig(pca_dir / "pca_scree.png", dpi=150)
     plt.close(fig)
 
-    # 2. PC1-PC2 scatter: responder/non-responder, marker size ~ COMDR_15min.
+    # 2. PC1 vs PC2 scatter, colored by responder or non-responder, sized by COMDR_15min.
     resp = data[CLASSIFICATION_TARGET].values == 1
     target = data[REGRESSION_TARGET].values
     fig, ax = plt.subplots(figsize=(7.2, 6))
@@ -181,7 +186,7 @@ def plot_pca_diagnostics(X_full: pd.DataFrame, data: pd.DataFrame) -> tuple:
     fig.savefig(pca_dir / "pca_scatter.png", dpi=150)
     plt.close(fig)
 
-    # 3. Biplot: feature-loading arrows + drug scores, both on PC1-PC2.
+    # 3. Biplot: feature loading arrows plus drug scores, both on PC1 and PC2.
     fig, ax = plt.subplots(figsize=(8, 7))
     sc = scores[:, :2] / np.max(np.abs(scores[:, :2]))
     ld = loadings[["PC1", "PC2"]].values
@@ -204,7 +209,7 @@ def plot_pca_diagnostics(X_full: pd.DataFrame, data: pd.DataFrame) -> tuple:
     fig.savefig(pca_dir / "pca_biplot.png", dpi=150)
     plt.close(fig)
 
-    # 4. Per-PC correlation with the continuous target (Pearson + Spearman).
+    # 4. Each component's correlation with the continuous target, Pearson and Spearman.
     npcs = min(6, scores.shape[1])
     corrs_p = [np.corrcoef(scores[:, kk], target)[0, 1] for kk in range(npcs)]
     corrs_s = [pd.Series(scores[:, kk]).corr(pd.Series(target), method="spearman") for kk in range(npcs)]
@@ -343,7 +348,7 @@ def stage_quantum(data: pd.DataFrame, selection: dict, execution_config: Executi
 
     plot_circuit_diagrams(n_features=len(selected_features), n_qcnn_features=len(selection["features_by_k"][6]))
 
-    # Task 3: kernel heatmap + KTA, per feature map -- one shared executor.
+    # Task 3: kernel heatmap and KTA score for each feature map, sharing one executor.
     kernel_executor = QuantumExecutor(execution_config)
     for fm_name in ["angle", "entangled", "zz"]:
         X_scaled = MinMaxScaler(feature_range=(0, np.pi)).fit_transform(X)
@@ -360,10 +365,9 @@ def stage_quantum(data: pd.DataFrame, selection: dict, execution_config: Executi
         fig.savefig(PLOTS_DIR / "kernels" / f"kernel_heatmap_{fm_name}.png", dpi=150)
         plt.close(fig)
 
-    # Task 4: full quantum model suite under LOOCV. The QCNN is architecturally
-    # fixed at 6 qubits (per the challenge spec), so it runs on the dedicated
-    # 6-feature subset rather than whichever k the automated selector found
-    # optimal for the other models.
+    # Task 4: run the full quantum model suite under LOOCV. The QCNN needs
+    # exactly 6 qubits, so it runs separately on its own 6 feature subset
+    # instead of whatever k the automated selector picked for the others.
     non_qcnn_names = [n for n in QUANTUM_MODEL_BUILDERS if n != "QCNN"]
     quantum_results = run_quantum_classification_suite(X, y, execution_config=execution_config, model_names=non_qcnn_names)
 
@@ -379,14 +383,14 @@ def stage_quantum(data: pd.DataFrame, selection: dict, execution_config: Executi
     save_results_table(q_table, "quantum_loocv.csv")
     logger.info("Quantum LOOCV results (backend=%s):\n%s", execution_config.label(), q_table.to_string())
 
-    # Per-drug score vs. true COMDR_15min scatter (best-accuracy quantum model).
+    # Plot each drug's predicted score against its true COMDR_15min, using the best quantum model.
     best_name = q_table.iloc[0]["model"]
     best_res = quantum_results[best_name]
     fig, ax = plt.subplots(figsize=(7, 6))
     ax.scatter(data[REGRESSION_TARGET].values[: len(best_res["y_true"])], best_res["y_proba"],
                c=best_res["y_true"], cmap="coolwarm")
     ax.set_xlabel("True COMDR_15min")
-    ax.set_ylabel(f"P(|1>) -- {best_name}")
+    ax.set_ylabel(f"P(|1>) from {best_name}")
     ax.set_title(f"Per-drug quantum score vs. true COMDR_15min ({best_name})")
     fig.tight_layout()
     fig.savefig(PLOTS_DIR / "scatter" / "score_vs_comdr.png", dpi=150)
@@ -452,7 +456,7 @@ def stage_unified_comparison(clf_results: dict, quantum_results: dict) -> None:
     ax.bar(table["model"], table["accuracy"], color=colors)
     ax.axhline(0.5, color="grey", linestyle="--", linewidth=1, label="majority baseline")
     ax.set_ylabel("LOOCV accuracy")
-    ax.set_title("Classical (blue) vs. Quantum (orange) -- unified LOOCV comparison")
+    ax.set_title("Classical (blue) vs Quantum (orange): unified LOOCV comparison")
     plt.xticks(rotation=30, ha="right")
     ax.legend()
     fig.tight_layout()

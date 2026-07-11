@@ -1,18 +1,19 @@
 """PCA diagnostic on the candidate descriptor set (Task 1 supplement).
 
-PCA here is explicitly NOT a feature-reduction step fed into the quantum/
-classical models -- it is unsupervised (maximises Var(X), not Cov(X, y)),
-and every downstream model must keep physically-interpretable RDKit
-descriptors as its features, not abstract PCA components. Its job is
-diagnostic: reveal *redundancy* in the 15-column candidate pool (e.g. the
-"size cluster" -- MolWt, Chi0v, Chi1v, Kappa1-3, BertzCT -- collapsing onto
-one latent axis).
+This PCA is not a feature reduction step, and nothing downstream trains on
+the PCA components themselves. PCA is unsupervised (it maximizes variance in
+X, not covariance with the target y), and every model in this project keeps
+physically interpretable RDKit descriptors as its input features.
 
-That redundancy signal is then used to make the automated feature selector
-in `features.py::select_k_best_features` cluster-aware: instead of blindly
-taking the top-k univariate scorers (which tends to pick several redundant
-descriptors from the same latent cluster), it takes at most one
-representative per PCA-identified cluster before falling back to raw score.
+What PCA is used for here is finding redundancy in the 16 column candidate
+pool. For example, MolWt, Chi0v, Chi1v, Kappa1, Kappa2, Kappa3, and BertzCT
+mostly describe the same thing (molecule size) and collapse onto a single
+principal component.
+
+That redundancy information then feeds into the feature selector in
+features.py. Instead of blindly taking the top scoring descriptors, which
+tends to pick several redundant ones from the same cluster, it takes at
+most one feature per PCA cluster first.
 """
 
 import numpy as np
@@ -22,15 +23,17 @@ from sklearn.preprocessing import StandardScaler
 
 
 def run_pca(X: pd.DataFrame, n_components: int | None = None) -> tuple[PCA, np.ndarray, pd.DataFrame]:
-    """Standardize X and fit PCA. Returns (fitted PCA, scores, loadings).
+    """Standardize X and fit PCA. Returns the fitted PCA object, the scores, and the loadings.
 
-    Standardization is essential: MolWt (~300-600), NumHDonors (0-4), and
-    BertzCT (~400-1200) live on wildly different scales -- without scaling,
-    high-variance features would dominate every PC purely from their units,
-    not from any real structure.
+    Standardization matters here because the raw descriptors live on very
+    different scales (MolWt is in the hundreds, NumHDonors is a small
+    integer, BertzCT is in the hundreds to thousands). Without scaling,
+    the high magnitude columns would dominate every component just because
+    of their units, not because they carry more real structure.
 
-    `loadings` is features x PCs, scaled by sqrt(explained_variance) so
-    arrow/bar magnitudes are directly comparable across components.
+    The loadings table is features by components, scaled by the square
+    root of the explained variance so that magnitudes are comparable
+    across components.
     """
     feats = list(X.columns)
     n_components = n_components or min(len(feats), len(X) - 1)
@@ -48,11 +51,10 @@ def run_pca(X: pd.DataFrame, n_components: int | None = None) -> tuple[PCA, np.n
 
 
 def get_pc_dominant_cluster(loadings: pd.DataFrame, n_top_pcs: int = 3) -> dict[str, int]:
-    """Assign each feature to its "dominant" principal component: the PC
-    (among the first `n_top_pcs`, which carry most of the variance) on
-    which that feature has the largest absolute loading. Features sharing a
-    dominant PC are, by construction, capturing largely the same latent
-    axis of variation -- i.e. they are redundant with each other.
+    """Assign each feature to the principal component it loads on most
+    strongly, looking only at the first n_top_pcs components (the ones
+    that carry most of the variance). Features that share a dominant
+    component are measuring roughly the same underlying thing.
     """
     top = loadings.iloc[:, :min(n_top_pcs, loadings.shape[1])]
     return {feat: int(np.argmax(np.abs(top.loc[feat].values))) for feat in top.index}
@@ -61,16 +63,16 @@ def get_pc_dominant_cluster(loadings: pd.DataFrame, n_top_pcs: int = 3) -> dict[
 def redundancy_aware_topk(
     scores: np.ndarray, feature_names: np.ndarray, clusters: dict[str, int], k: int
 ) -> list[str]:
-    """Pick k features from `feature_names`, ranked by `scores` descending,
-    but preferring at most one representative per PCA cluster: the
-    highest-scoring feature from each cluster is taken first (in score
-    order across clusters), and only once every cluster has contributed one
-    feature does a second feature from any cluster get considered.
+    """Pick k features ranked by score, but spread the picks across PCA
+    clusters instead of taking the top k regardless of cluster.
 
-    This directly counters the failure mode of plain top-k univariate
-    selection on this dataset: picking several highly-collinear descriptors
-    (e.g. Kappa1, Kappa2, Kappa3, Chi0v -- all loading on the same "size"
-    PC) that add little independent signal over one of them alone.
+    The best scoring feature from each cluster is taken first, going
+    through clusters in score order. Only once every cluster has
+    contributed one feature does a second feature from the same cluster
+    get considered. This avoids picking several highly correlated
+    descriptors, such as Kappa1, Kappa2, Kappa3 and Chi0v, which all load
+    on the same size related component and add little beyond what one of
+    them already captures.
     """
     order = np.argsort(-scores)
     ranked_features = [feature_names[i] for i in order]

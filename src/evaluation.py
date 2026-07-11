@@ -1,11 +1,11 @@
-"""LOOCV orchestration engine, Kernel Target Alignment, and results summarizer.
+"""The LOOCV evaluation engine, the Kernel Target Alignment metric, and the
+results table builder.
 
-The single hard rule enforced throughout this module: any scaler, selector,
-or model is fit *only* on the training fold inside the LOOCV loop, and only
-`.transform()` / `.predict()` touches the held-out sample. `loocv_evaluate`
-and `loocv_evaluate_regression` are the two entry points every model in
-`classical_models.py` and `quantum_models.py` is routed through, so this
-guarantee holds uniformly across the whole model suite.
+Any scaler or model is fit only on the training fold, and the held out 
+sample only ever gets .transform() or .predict() called on it, never .fit(). 
+loocv_evaluate and loocv_evaluate_regression are the two functions that every 
+model in classical_models.py and quantum_models.py runs through, so this rule holds
+for the whole project, not just some models.
 """
 
 import logging
@@ -36,11 +36,12 @@ def loocv_evaluate(
     feature_range: tuple[float, float] = (0.0, 1.0),
     scale: bool = True,
 ) -> dict:
-    """Full N-fold LOOCV for a binary classifier.
+    """Run full leave one out cross validation for a binary classifier.
 
-    `model_factory()` must return a *fresh, unfitted* model instance -- called
-    once per fold so no state (including any internal RNG/optimizer state)
-    leaks across folds.
+    model_factory() must return a fresh, unfitted model each time it is
+    called, since it gets called once per fold. This makes sure no state
+    from one fold, including any random seed or optimizer state, carries
+    over into the next fold.
     """
     X_arr = np.asarray(X, dtype=float)
     y_arr = np.asarray(y)
@@ -90,9 +91,10 @@ def loocv_evaluate_regression(
     feature_range: tuple[float, float] = (0.0, 1.0),
     scale: bool = True,
 ) -> dict:
-    """Full N-fold LOOCV for a regressor; reports Q^2 (LOOCV) and, via a
-    separate full-data refit, R^2 (training fit) for comparison against the
-    Patzmann et al. benchmark table.
+    """Run full leave one out cross validation for a regressor. Reports Q^2
+    from the LOOCV predictions, and separately reports R^2 from refitting
+    on the full dataset, so both numbers can be compared to the Patzmann
+    et al. benchmark table.
     """
     X_arr = np.asarray(X, dtype=float)
     y_arr = np.asarray(y, dtype=float)
@@ -114,7 +116,7 @@ def loocv_evaluate_regression(
         y_true.append(float(y_test[0]))
 
     y_true, y_pred = np.array(y_true), np.array(y_pred)
-    q2 = r2_score(y_true, y_pred)  # R^2 of LOOCV predictions vs truth == Q^2
+    q2 = r2_score(y_true, y_pred)  # Q^2 is just R^2 computed on the LOOCV predictions
 
     scaler = MinMaxScaler(feature_range=feature_range)
     X_full = scaler.fit_transform(X_arr) if scale else X_arr
@@ -127,9 +129,10 @@ def loocv_evaluate_regression(
 
 
 def kernel_target_alignment(K: np.ndarray, y: np.ndarray) -> float:
-    """Kernel-Target Alignment: cosine similarity between the kernel matrix K
-    and the ideal label kernel yy^T, in {-1, ..., +1}. Higher means the
-    kernel's geometry already separates the two classes.
+    """Kernel Target Alignment: the cosine similarity between the kernel
+    matrix K and the ideal label kernel y times y transpose. Ranges from
+    -1 to 1. A higher value means the kernel's geometry already lines up
+    with the class labels.
     """
     y_signed = np.where(np.asarray(y) > 0, 1.0, -1.0)
     K_y = np.outer(y_signed, y_signed)
@@ -139,7 +142,7 @@ def kernel_target_alignment(K: np.ndarray, y: np.ndarray) -> float:
 
 
 def summarize_results(results_by_model: dict[str, dict], kind: str = "classification") -> pd.DataFrame:
-    """Flatten a {model_name: loocv_evaluate(...) output} dict into one table."""
+    """Turn a dict of model name to loocv_evaluate() output into one table."""
     rows = []
     for name, res in results_by_model.items():
         row = {"model": name, **res["metrics"]}
@@ -158,9 +161,12 @@ def save_results_table(df: pd.DataFrame, filename: str) -> None:
 
 
 def _self_test_leakage_guard() -> None:
-    """Runnable sanity check: a scaler fit on the *full* dataset (leaky) must
-    not silently match the fold-safe path -- proves the harness is actually
-    exercising leak-free scaling rather than a no-op.
+    """A quick check comparing the leak free path against a leaky control,
+    where the scaler is fit on the whole dataset before LOOCV even starts.
+    On random data the two accuracy numbers may end up close by chance.
+    What actually matters is that scale=True never calls scaler.fit() on
+    the held out row, which is guaranteed by the code itself, not by this
+    comparison. This check is here as a runnable sanity test, not as proof.
     """
     from sklearn.linear_model import LogisticRegression
 
@@ -170,20 +176,16 @@ def _self_test_leakage_guard() -> None:
 
     safe = loocv_evaluate(lambda: LogisticRegression(max_iter=1000), X, y, scale=True)
 
-    # Leaky control: fit scaler on the FULL dataset once, then run "LOOCV"
-    # only on the already-globally-scaled data.
+    # Leaky control: fit the scaler on the whole dataset once, up front,
+    # then run "LOOCV" on data that has already seen every row.
     X_leaky = MinMaxScaler().fit_transform(X.values)
     leaky_res = loocv_evaluate(
         lambda: LogisticRegression(max_iter=1000),
         pd.DataFrame(X_leaky, columns=X.columns), y, scale=False,
     )
 
-    logger.info("Leak-free accuracy: %.3f | Leaky-scaler accuracy: %.3f",
+    logger.info("Leak-free accuracy: %.3f, leaky-scaler accuracy: %.3f",
                 safe["metrics"]["accuracy"], leaky_res["metrics"]["accuracy"])
-    logger.info("(Scores may coincide by chance on random data; the guarantee "
-                "this proves is structural -- `scale=True` never calls "
-                "MinMaxScaler.fit on the held-out row -- verified by code path, "
-                "not by this numeric comparison alone.)")
 
 
 if __name__ == "__main__":

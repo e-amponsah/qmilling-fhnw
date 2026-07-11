@@ -1,19 +1,18 @@
-"""One-time setup: read IBM Cloud credentials from .env and save them as the
-default account for `qiskit-ibm-runtime`, so `ExecutionConfig(mode="ibm_runtime")`
-(see `src/quantum_backend.py`) can resolve a real backend without any
-credentials embedded in code or passed on the command line.
+"""One-time setup script. Reads IBM Cloud credentials from .env and saves
+them as the default qiskit-ibm-runtime account, so ExecutionConfig(mode=
+"ibm_runtime") in src/quantum_backend.py can connect to a real backend
+without any credentials in code or on the command line.
 
 Usage:
     python scripts/setup_ibm_account.py
 
 Reads from .env (see .env.example):
-    IBM_QUANTUM_CRN       -- Cloud Resource Name of your Qiskit Runtime instance
-    IBM_QUANTUM_API_KEY   -- IBM Cloud API key
+    IBM_QUANTUM_CRN       Cloud Resource Name of your Qiskit Runtime instance
+    IBM_QUANTUM_API_KEY   IBM Cloud API key
 
 The account is saved to the standard qiskit-ibm-runtime credential store
-(~/.qiskit/qiskit-ibm-runtime/account-config.json) under the name "default"
-and set as the default account, so no further configuration is needed by
-any other script in this repo.
+under the name "default" and set as the default account, so nothing else
+in this repo needs any further configuration.
 """
 
 import logging
@@ -43,7 +42,7 @@ def main() -> int:
     api_key = os.environ.get("IBM_QUANTUM_API_KEY", "").strip()
     if not crn or not api_key:
         logger.error(
-            "IBM_QUANTUM_CRN and/or IBM_QUANTUM_API_KEY are missing/empty in .env. "
+            "IBM_QUANTUM_CRN and/or IBM_QUANTUM_API_KEY are missing or empty in .env. "
             "See .env.example for where to find these values."
         )
         return 1
@@ -60,7 +59,7 @@ def main() -> int:
         set_as_default=True,
     )
 
-    logger.info("Verifying: instantiating QiskitRuntimeService() and listing backends...")
+    logger.info("Verifying the account by connecting and listing backends...")
     try:
         service = QiskitRuntimeService()
         backends = service.backends()
@@ -77,8 +76,8 @@ def main() -> int:
             logger.info("  - %-25s operational=%-5s pending_jobs=%d", b.name, status.operational, status.pending_jobs)
 
     logger.info(
-        "Done. Set QC_BACKEND_MODE=ibm_runtime (in .env or the environment) to "
-        "route quantum circuit execution through this account by default."
+        "Done. Set QC_BACKEND_MODE=ibm_runtime in .env, or pass --backend ibm-runtime "
+        "to main.py, to route quantum circuit execution through this account."
     )
     return 0
 

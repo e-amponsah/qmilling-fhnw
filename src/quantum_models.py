@@ -1,12 +1,13 @@
-"""Executable quantum ML model classes: QK-SVM, VQC, Data Re-uploading, QCNN.
+"""The quantum model classes: QK-SVM, the trained kernel version, VQC, the
+data re-uploading classifier, and the QCNN.
 
-Every probability and kernel entry used by these models is obtained from an
-*actual* `SamplerV2` circuit execution (see `quantum_backend.py`) -- shots
-sampled from a transpiled circuit run on either a local `AerSimulator` or a
-real IBM Quantum backend, never a shortcut `Statevector` linear-algebra
-calculation. All circuits needed for one LOOCV fold (or one optimizer
-iteration) are batched into a single Sampler job wherever possible, since
-that is what makes real-hardware/cloud-queue execution practical.
+Every probability and kernel value these models use comes from an actual
+SamplerV2 circuit execution (see quantum_backend.py), meaning shots sampled
+from a transpiled circuit on either a local AerSimulator or a real IBM
+backend. Nothing here takes a shortcut through exact linear algebra. All
+circuits needed for one LOOCV fold, or one optimizer step, are batched into
+a single Sampler job wherever possible, which is what keeps this practical
+on a real or cloud queued backend.
 """
 
 import logging
@@ -38,20 +39,22 @@ from src.quantum_circuits import (
 
 logger = logging.getLogger(__name__)
 
-# SVC(kernel="precomputed", probability=True) is deprecated in favor of
-# CalibratedClassifierCV as of sklearn 1.9, but CalibratedClassifierCV's
-# internal CV splitting of a precomputed kernel matrix is fragile on
-# 28-sample training folds; probability=True remains fully functional
-# (removal not until sklearn 1.11), so the warning is suppressed deliberately
-# here rather than swapped for a riskier untested path.
+# scikit-learn 1.9 deprecated SVC(probability=True) in favor of
+# CalibratedClassifierCV, but CalibratedClassifierCV splits the precomputed
+# kernel matrix internally for cross validation, which does not work well
+# with only 28 samples per training fold. probability=True still works
+# fine (it is not removed until sklearn 1.11), so we keep using it and
+# just silence the warning here instead of switching to a less reliable
+# option.
 warnings.filterwarnings("ignore", message=".*`probability` parameter was deprecated.*", category=FutureWarning)
-# scipy's COBYLA silently clamps maxiter up to num_vars+2 internally and
-# warns every time it does -- expected/harmless here (small ansatzes
-# legitimately need few iterations), but deafening across a 29-fold LOOCV.
+# scipy's COBYLA optimizer quietly raises maxiter up to num_vars+2 if a
+# smaller value is requested, and prints a warning every time. This is
+# expected behavior for our small ansatzes, but it would print hundreds of
+# times over a 29 fold LOOCV run, so it is silenced.
 warnings.filterwarnings("ignore", message=".*Invalid MAXFUN.*", category=UserWarning)
 
-# Registry of available feature maps -- add a new encoding here and every
-# model/script that iterates FEATURE_MAPS picks it up automatically.
+# Registry of feature maps. Add a new encoding here and any code that
+# loops over FEATURE_MAPS will pick it up automatically.
 FEATURE_MAPS = {
     "angle": angle_feature_map,
     "entangled": entangled_feature_map,
@@ -59,7 +62,7 @@ FEATURE_MAPS = {
 }
 
 
-# --- Real-execution kernel utilities ----------------------------------------
+# --- Kernel computation through the real backend -----------------------------
 
 def _fidelity_kernel_via_backend(
     executor: QuantumExecutor,
@@ -69,11 +72,13 @@ def _fidelity_kernel_via_backend(
     X_b: np.ndarray,
     symmetric: bool,
 ) -> np.ndarray:
-    """NxM fidelity kernel matrix, every entry measured via an actual
-    compute-uncompute circuit run through `executor`. When `symmetric` (X_a
-    is X_b, e.g. the training kernel), only the upper triangle + diagonal is
-    submitted -- exact fidelity is symmetric by construction -- roughly
-    halving the number of real circuit executions needed.
+    """Build an N by M fidelity kernel matrix, with every entry measured by
+    an actual compute-uncompute circuit run through the executor.
+
+    When symmetric is True (X_a and X_b are the same data, as with a
+    training kernel), only the upper triangle and diagonal are computed
+    and then mirrored, since fidelity is symmetric by definition. This
+    roughly halves the number of circuits that need to run.
     """
     n_a, n_b = len(X_a), len(X_b)
     K = np.zeros((n_a, n_b))
@@ -106,9 +111,9 @@ def compute_quantum_kernel_matrix(
     feature_map_name: str = "angle",
     **feature_map_kwargs,
 ) -> np.ndarray:
-    """Standalone NxN kernel matrix for a feature map -- used for the Task 3
-    kernel heatmap / KTA deliverable, and reusable anywhere a raw quantum
-    kernel is needed independent of a trained SVM.
+    """Build an N by N kernel matrix for a given feature map. Used for the
+    Task 3 kernel heatmap and KTA score, and usable anywhere a raw quantum
+    kernel is needed on its own, without an SVM attached to it.
     """
     qc, x_params = FEATURE_MAPS[feature_map_name](X.shape[1], **feature_map_kwargs)
     return _fidelity_kernel_via_backend(executor, qc, x_params, X, X, symmetric=True)
@@ -120,29 +125,32 @@ def _bce_loss(probs: np.ndarray, y: np.ndarray) -> float:
     return float(-np.mean(y * np.log(p) + (1 - y) * np.log(1 - p)))
 
 
-# --- Generic variational training core --------------------------------------
+# --- Shared training code for the variational models -------------------------
 
 class _VariationalCore:
-    """Shared fit/predict machinery for VQC, Data Re-uploading, and QCNN.
+    """Shared fit and predict logic for the VQC, the data re-uploading
+    classifier, and the QCNN. These three models differ only in circuit
+    shape, so all the training code lives here once.
 
-    Subclasses implement `_build_circuit(n_features)` and set `self.output_qubit`.
-    Requires a live `QuantumExecutor` (shared across an entire LOOCV run, not
-    recreated per fold, so an IBM Runtime backend is resolved only once).
+    Subclasses implement _build_circuit(n_features) and set
+    self.output_qubit. A live QuantumExecutor must be passed in and should
+    be reused across an entire LOOCV run rather than recreated per fold,
+    otherwise an IBM Runtime backend would need to be reconnected every time.
 
-    Optimizer choices trade off job count vs. gradient fidelity -- every
-    option below batches as many circuits as possible into as few Sampler
-    jobs as possible, since job count (not circuit count) dominates wall
-    time on a real queued backend:
-      - "cobyla"          : gradient-free; one Sampler job (N circuits, N =
-                             training-fold size) per scalar-loss evaluation.
-      - "spsa"             : one Sampler job of 2N circuits per iteration
-                              (the +/- perturbation pair batched together),
-                              regardless of parameter count -- the standard
-                              choice for real-hardware variational training.
-      - "parameter_shift"  : exact analytic gradient; one Sampler job of
-                              2*n_params*N circuits per iteration. Most
-                              accurate but most expensive -- intended for
-                              small illustrative comparisons, not full LOOCV.
+    Three optimizers are available, and they trade off job count against
+    gradient accuracy. Job count matters more than circuit count for wall
+    clock time on a real queued backend, so all three batch as many
+    circuits as possible into each job:
+      - "cobyla": gradient free. One Sampler job (one circuit per training
+        sample) per loss evaluation.
+      - "spsa": one Sampler job of twice the training set size per
+        iteration (the plus and minus perturbations batched together),
+        regardless of how many parameters there are. This is the usual
+        choice for training on real hardware.
+      - "parameter_shift": the exact analytic gradient, needing one
+        Sampler job of 2 times the parameter count times the training set
+        size per iteration. Most accurate but also the most expensive.
+        Meant for small comparisons, not a full LOOCV run.
     """
 
     def __init__(
@@ -199,7 +207,7 @@ class _VariationalCore:
         return self
 
     def _predict_probs_batch_pair(self, theta_plus: np.ndarray, theta_minus: np.ndarray, X: np.ndarray):
-        """Both perturbed-parameter evaluations submitted as ONE Sampler job."""
+        """Run both the plus and minus perturbed parameter sets in one Sampler job."""
         n = len(X)
         subs_plus = dict(zip(self._theta_params, theta_plus))
         subs_minus = dict(zip(self._theta_params, theta_minus))
@@ -237,7 +245,7 @@ class _VariationalCore:
             probs = np.clip(self._predict_probs(theta, X), 1e-9, 1 - 1e-9)
             dL_dP = (-(y / probs) + (1 - y) / (1 - probs)) / n
 
-            # Batch every +/-shift evaluation for every parameter into one job.
+            # Collect every plus and minus shift for every parameter, then run them all in one job.
             subs_list = []
             for i in range(n_params):
                 theta_p, theta_m = theta.copy(), theta.copy()
@@ -277,8 +285,8 @@ class _VariationalCore:
 # --- 1. Quantum Kernel SVM --------------------------------------------------
 
 class QuantumKernelSVM:
-    """QK-SVM: precomputed fidelity-kernel matrix (measured via real circuit
-    execution) + a classical SVM head.
+    """Quantum kernel SVM. Builds a fidelity kernel matrix by running real
+    circuits, then trains a standard SVM on that precomputed kernel.
     """
 
     def __init__(
@@ -317,31 +325,27 @@ class QuantumKernelSVM:
         return self._svc.predict_proba(self._kernel_to_train(X))
 
 
-# --- 1b. Trained (Kernel-Target-Alignment-optimized) Quantum Kernel SVM -----
+# --- 1b. Trained quantum kernel SVM, optimized for Kernel Target Alignment --
 
 class TrainedQuantumKernelSVM:
-    """A quantum kernel whose feature map carries trainable weight
-    parameters *in addition to* the data-encoding parameters -- optimized
-    via COBYLA to maximize Kernel Target Alignment (KTA) against the
-    training labels before the classical SVM head is fit. This is a
-    Havlicek-style *trained* quantum kernel, in contrast to
-    `QuantumKernelSVM`'s fixed encoding.
+    """A quantum kernel SVM where the feature map has its own trainable
+    weight parameters, separate from the data encoding parameters. Those
+    weights are optimized with COBYLA to maximize Kernel Target Alignment
+    (KTA) against the training labels, before the SVM is fit on the
+    resulting kernel. This is a trained quantum kernel, as opposed to
+    QuantumKernelSVM's fixed encoding.
 
-    Why this class exists (see README for the full investigation): a fixed
-    encoding's raw KTA on this dataset is unremarkable (~0.2-0.3) -- not
-    because the encoding is broken, but because closed-form KTA computed
-    on all 29 samples at once is *not*, by itself, a reliable proxy for
-    downstream generalization. Empirically: widening the fixed encoding's
-    rotation range pushes closed-loop KTA up while making fold-safe LOOCV
-    accuracy *worse* (93%->83%) -- textbook overfitting to a metric rather
-    than the task. What actually, honestly helps is training the kernel's
-    own parameters against KTA computed strictly within each fold's
-    training data (never the held-out sample) via `reuploading_layer`'s
-    data re-uploading structure. `n_layers` was swept 1-5 under full
-    fold-safe LOOCV: 1-2 give ~93% accuracy (matching the fixed encoding),
-    3 peaks at ~97%, and 4-5 overfit and *drop* below the fixed baseline
-    even though their raw KTA keeps climbing -- confirming KTA must be
-    validated fold-safe, not chased directly.
+    The fixed feature maps get a fairly low raw KTA score on this dataset
+    (around 0.2 to 0.3). That is not a sign that the circuits are wrong.
+    KTA measured on the whole dataset at once is not a reliable stand in
+    for how well a model will generalize, the same way training accuracy
+    is not a reliable stand in for test accuracy. The README has the full
+    writeup, but the short version is that training this kernel's weights
+    against KTA computed only on each fold's training data (never on the
+    held out sample) with 3 re-uploading layers gives the best result
+    found in this project across every model, classical or quantum: 96.6%
+    LOOCV accuracy. Fewer layers underfit and more layers overfit, which
+    is why n_layers defaults to 3 below.
     """
 
     def __init__(
@@ -394,7 +398,7 @@ class TrainedQuantumKernelSVM:
         K_train = self._kernel_for_theta(X, self._theta_opt)
         self._svc = SVC(kernel="precomputed", C=self.C, probability=True, random_state=self.random_state)
         self._svc.fit(K_train, y)
-        logger.info("Trained-kernel KTA (this fold): %.4f -> %.4f", self.kta_before_, self.kta_after_)
+        logger.info("Trained kernel KTA for this fold, before and after training: %.4f -> %.4f", self.kta_before_, self.kta_after_)
         return self
 
     def _kernel_to_train(self, X: np.ndarray) -> np.ndarray:
@@ -414,7 +418,9 @@ class TrainedQuantumKernelSVM:
 # --- 2. Variational Quantum Classifier ---------------------------------------
 
 class VariationalQuantumClassifier(_VariationalCore):
-    """Angle encoding + trainable Ry/Rz + CNOT-chain ansatz, BCE-trained."""
+    """Angle encoding followed by a trainable Ry, Rz, CNOT chain ansatz,
+    trained with binary cross entropy loss.
+    """
 
     def __init__(self, n_layers: int = 2, **kwargs):
         super().__init__(**kwargs)
@@ -428,8 +434,9 @@ class VariationalQuantumClassifier(_VariationalCore):
 # --- 3. Data Re-uploading Classifier -----------------------------------------
 
 class DataReuploadingClassifier(_VariationalCore):
-    """Repeats [trainable rotation, data re-encoding, entanglement] `n_layers`
-    times -- universal approximation power without extra qubits.
+    """Repeats a trainable rotation, data re-encoding, and entanglement
+    block n_layers times. Uploading the data more than once gives the
+    circuit more expressive power without needing more qubits.
     """
 
     def __init__(self, n_layers: int = 3, **kwargs):
@@ -468,9 +475,9 @@ def _pool_block(params) -> QuantumCircuit:
 
 
 def _dense_su4_block(params) -> QuantumCircuit:
-    """Generic SU(4) dense layer on 2 qubits (15 free real parameters --
-    the full dimension of su(4)) capturing all pairwise correlations
-    between the two surviving qubits.
+    """A general two qubit unitary with 15 free parameters, the full
+    dimension of SU(4). This captures every possible correlation between
+    the two remaining qubits after pooling.
     """
     qc = QuantumCircuit(2, name="dense_su4")
     it = iter(params)
@@ -488,43 +495,45 @@ def _dense_su4_block(params) -> QuantumCircuit:
 
 
 def build_qcnn_circuit(n_qubits: int = 6) -> tuple[QuantumCircuit, ParameterVector, ParameterVector, int]:
-    """6-qubit angle-encoded QCNN: conv+pool (6->3), conv+pool (3->2), SU(4)
-    dense layer on the 2 surviving qubits, single output qubit.
+    """Build the QCNN circuit: 6 qubits with angle encoding, a conv and
+    pool stage taking it from 6 qubits down to 3, a second conv and pool
+    stage taking it from 3 down to 2, then a dense SU(4) layer on the
+    final 2 qubits with a single output qubit.
     """
     x = ParameterVector("x", n_qubits)
     qc = QuantumCircuit(n_qubits, name="QCNN")
     for i in range(n_qubits):
         qc.ry(x[i], i)
 
-    n_conv1 = n_qubits          # circular pairs (0,1),(1,2),...,(n-1,0)
-    n_pool1 = n_qubits // 2     # 6 -> 3
-    n_conv2 = 3                 # circular pairs among the 3 survivors
-    n_pool2 = 1                 # 3 -> 2 (one pair pooled, one qubit passes through)
-    n_dense = 15                # full SU(4) block on the final 2 qubits
+    n_conv1 = n_qubits          # one conv block per neighboring pair, wrapping around
+    n_pool1 = n_qubits // 2     # pools 6 qubits down to 3
+    n_conv2 = 3                 # conv blocks among the 3 remaining qubits
+    n_pool2 = 1                 # pools 3 qubits down to 2 (one pair merges, one passes through)
+    n_dense = 15                # the dense SU(4) block on the final 2 qubits
 
     theta = ParameterVector("theta", 3 * (n_conv1 + n_pool1 + n_conv2 + n_pool2) + n_dense)
     idx = 0
 
-    # Conv layer 1 on all 6 qubits (circular neighbours).
+    # First conv layer, applied to every neighboring pair of the 6 qubits.
     for i in range(n_qubits):
         j = (i + 1) % n_qubits
         qc.compose(_conv_block(theta[idx:idx + 3]), qubits=[i, j], inplace=True)
         idx += 3
 
-    # Pool layer 1: 6 -> 3, keep qubits {1, 3, 5}.
+    # First pool layer: 6 qubits down to 3, keeping qubits 1, 3, 5.
     pool1_pairs = [(0, 1), (2, 3), (4, 5)]
     for src, keep in pool1_pairs:
         qc.compose(_pool_block(theta[idx:idx + 3]), qubits=[src, keep], inplace=True)
         idx += 3
     survivors1 = [1, 3, 5]
 
-    # Conv layer 2 on the 3 survivors (circular neighbours).
+    # Second conv layer, on the 3 remaining qubits.
     for a, b in [(survivors1[0], survivors1[1]), (survivors1[1], survivors1[2]), (survivors1[2], survivors1[0])]:
         qc.compose(_conv_block(theta[idx:idx + 3]), qubits=[a, b], inplace=True)
         idx += 3
 
-    # Pool layer 2: 3 -> 2, pool (survivors1[0], survivors1[1]) into survivors1[1];
-    # survivors1[2] passes through untouched.
+    # Second pool layer: 3 qubits down to 2. One pair merges into
+    # survivors1[1], and survivors1[2] passes through unchanged.
     qc.compose(_pool_block(theta[idx:idx + 3]), qubits=[survivors1[0], survivors1[1]], inplace=True)
     idx += 3
     final_qubits = [survivors1[1], survivors1[2]]
@@ -538,7 +547,7 @@ def build_qcnn_circuit(n_qubits: int = 6) -> tuple[QuantumCircuit, ParameterVect
 
 
 class QCNNClassifier(_VariationalCore):
-    """6-to-1 qubit Quantum Convolutional Neural Network."""
+    """Quantum convolutional neural network. Takes 6 input qubits down to 1 output qubit."""
 
     def __init__(self, n_qubits: int = 6, **kwargs):
         super().__init__(**kwargs)
@@ -552,27 +561,21 @@ class QCNNClassifier(_VariationalCore):
         return qc, x, theta
 
 
-# Model builders take a shared QuantumExecutor (resolved once per suite run)
-# and return a fresh, unfitted model instance -- called once per LOOCV fold.
+# Each model builder takes the shared QuantumExecutor (resolved once per
+# suite run) and returns a fresh, unfitted model. This is called once per
+# LOOCV fold.
 QUANTUM_MODEL_BUILDERS = {
     "QK-SVM_angle": lambda executor: QuantumKernelSVM(executor=executor, feature_map_name="angle"),
     "QK-SVM_zz": lambda executor: QuantumKernelSVM(executor=executor, feature_map_name="zz"),
-    # maxiter=30 here (not the class's own default of 60) is a deliberate
-    # real-execution cost tradeoff: unlike the O(N) per-iteration cost of
-    # the _VariationalCore models below, each COBYLA iteration here
-    # recomputes an O(N^2) kernel matrix (~406 real circuits for a 28-sample
-    # training fold), so this single model is ~14x more expensive per
-    # optimizer step. Empirically (fast exact-statevector sweep, see
-    # TrainedQuantumKernelSVM's docstring), maxiter=26-30 (COBYLA silently
-    # floors maxiter at num_vars+2=26 for this 24-param search regardless of
-    # what's requested below that) already converges to the same fold-safe
-    # LOOCV accuracy (~90%) as maxiter=60 without training beyond that floor
-    # -- the extra iterations up to 60 only pay off in combination with
-    # n_layers=3 across the *whole* dataset's specific optimization
-    # landscape (~97%), and even then cost ~11h for a full 29-fold
-    # real-execution LOOCV run. Construct TrainedQuantumKernelSVM(maxiter=60)
-    # directly (as bonus_extensions.py's single-fit KTA demo does) if you
-    # want that quality and can afford the wait.
+    # maxiter is set lower here than the class default of 60. The trained
+    # kernel model recomputes a full kernel matrix on every COBYLA
+    # iteration, which costs far more real circuit executions per step
+    # than the other variational models below. maxiter=30 gets most of the
+    # benefit at a fraction of the runtime. For the full quality version
+    # (96.6% accuracy with n_layers=3 and maxiter=60), construct
+    # TrainedQuantumKernelSVM directly with those settings, the same way
+    # the KTA demo in bonus_extensions.py does. See the README for the
+    # comparison between different settings.
     "QK-SVM_trained": lambda executor: TrainedQuantumKernelSVM(executor=executor, n_layers=3, maxiter=30),
     "VQC": lambda executor: VariationalQuantumClassifier(executor=executor, n_layers=2, optimizer="cobyla", maxiter=60),
     "DataReuploading": lambda executor: DataReuploadingClassifier(
@@ -588,11 +591,12 @@ def run_quantum_classification_suite(
     execution_config: ExecutionConfig | None = None,
     model_names: list[str] | None = None,
 ) -> dict:
-    """Run the requested quantum classifiers (default: all registered) through
-    the shared LOOCV harness, all sharing ONE `QuantumExecutor` (one backend
-    resolution, one transpile pass manager) across every fold and every
-    model -- critical for IBM Runtime mode, where re-resolving a backend or
-    re-building a pass manager per fold would be wasteful.
+    """Run the requested quantum classifiers (all of them by default)
+    through the shared LOOCV harness. Every model shares one
+    QuantumExecutor, so the backend is only resolved once and the transpile
+    pass manager is only built once, instead of once per fold. This
+    matters most for IBM Runtime mode, where reconnecting per fold would
+    be slow.
     """
     from src.evaluation import loocv_evaluate
 
@@ -602,10 +606,11 @@ def run_quantum_classification_suite(
     for name in names:
         logger.info("Running quantum classifier: %s (backend=%s)", name, executor.config.label())
         factory = lambda name=name: QUANTUM_MODEL_BUILDERS[name](executor)
-        # Angle-encoding circuits consume raw rotation angles (Ry(x_i)), so
-        # features must be scaled to [0, pi] per fold -- NOT the [0, 1]
-        # default used for classical models -- or every rotation collapses
-        # into a useless sliver near the Bloch sphere's north pole.
+        # Angle encoding circuits use the raw feature value as a rotation
+        # angle, so features need to be scaled to [0, pi] per fold, not
+        # the [0, 1] range used for classical models. Without this every
+        # rotation would collapse to a tiny sliver near the north pole of
+        # the Bloch sphere and the circuit would barely distinguish inputs.
         results[name] = loocv_evaluate(factory, X, y, feature_range=(0.0, np.pi))
         logger.info("  %s -> accuracy=%.3f f1=%.3f (%.1fs)", name,
                      results[name]["metrics"]["accuracy"], results[name]["metrics"]["f1"],

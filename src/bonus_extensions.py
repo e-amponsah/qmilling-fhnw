@@ -1,10 +1,12 @@
-"""Advanced bonus engineering: KTA-optimized (trained) quantum kernels,
-device-vs-ideal noise-degradation study, and a blind SMILES prediction
-interface. Both quantum-facing sections reuse `quantum_backend.py` /
-`quantum_models.py`'s real-execution machinery rather than duplicating any
-circuit-running logic -- "noisy" here means an actual `ExecutionConfig(mode=
-"aer_noisy")` run (or, with no code changes, `mode="ibm_runtime"` for a
-comparison against genuine hardware).
+"""The three bonus features from the challenge brief: the KTA optimized
+trained quantum kernel, a noise or real hardware degradation study, and a
+blind SMILES prediction interface.
+
+Both quantum facing pieces here reuse the real execution code in
+quantum_backend.py and quantum_models.py instead of duplicating any circuit
+running logic. "Noisy" means an actual ExecutionConfig with
+mode="aer_noisy", and swapping in mode="ibm_runtime" runs the exact same
+comparison against real hardware with no other code changes needed.
 """
 
 import logging
@@ -21,16 +23,15 @@ from src.quantum_models import TrainedQuantumKernelSVM, _fidelity_kernel_via_bac
 
 logger = logging.getLogger(__name__)
 
-# The KTA-optimized trained quantum kernel now lives in quantum_models.py as
-# a first-class, validated member of the core LOOCV suite (n_layers=3 was
-# swept 1-5 and empirically found to be the fold-safe-accuracy sweet spot --
-# see its docstring). Kept importable under its original bonus-task name here
-# since that's the class the challenge's "KTA optimization" bonus deliverable
-# refers to; no logic is duplicated.
+# The KTA optimized trained quantum kernel lives in quantum_models.py now,
+# as a regular member of the main LOOCV suite rather than a separate bonus
+# only class. It is kept importable under this name here since that is the
+# name the "KTA optimization" bonus task refers to, and it avoids having
+# the same class defined in two places.
 KTAOptimizedQuantumKernel = TrainedQuantumKernelSVM
 
 
-# --- 2. Noise / real-hardware degradation study ------------------------------
+# --- Noise and real hardware degradation study -------------------------------
 
 def execution_degradation_study(
     X: np.ndarray,
@@ -41,20 +42,21 @@ def execution_degradation_study(
     comparison_config: ExecutionConfig | None = None,
     random_state: int = RANDOM_SEED,
 ) -> dict:
-    """Compare QK-SVM accuracy between a baseline execution target (default:
-    ideal local `aer_simulator`) and a comparison target (default: local
-    `aer_noisy`, a device-like noise model) under leak-free K-fold CV.
+    """Compare QK-SVM accuracy between a baseline execution target (the
+    ideal local aer_simulator by default) and a comparison target (a local
+    aer_noisy device-like noise model by default), using leak free k-fold
+    cross validation.
 
-    Passing `comparison_config=ExecutionConfig(mode="ibm_runtime")` runs the
-    exact same comparison against genuine IBM Quantum hardware instead of a
-    synthetic noise model, with no other code changes -- the whole point of
-    routing every kernel evaluation through `quantum_backend.py`.
+    Pass comparison_config=ExecutionConfig(mode="ibm_runtime") to run the
+    same comparison against real IBM Quantum hardware instead of a
+    synthetic noise model. No other changes are needed, since every kernel
+    evaluation already goes through quantum_backend.py.
 
-    K-fold (not the full 29-fold LOOCV used for the core Task 4 suite) is
-    used here because a noisy/hardware kernel evaluation costs one real
-    circuit execution per pair, per fold -- a deliberate runtime/cost
-    tradeoff for this exploratory bonus study, not a shortcut applied to the
-    mandatory LOOCV evaluation.
+    This uses k-fold cross validation rather than the full 29 fold LOOCV
+    used for the main Task 4 suite, because a noisy or real hardware
+    kernel evaluation costs one real circuit execution per pair per fold.
+    That is a deliberate tradeoff for this exploratory bonus study. It
+    does not apply to the required LOOCV evaluation elsewhere.
     """
     from src.quantum_models import FEATURE_MAPS
 
@@ -97,19 +99,20 @@ def execution_degradation_study(
     }
 
 
-# --- 3. Blind SMILES prediction interface ------------------------------------
+# --- Blind SMILES prediction interface ---------------------------------------
 
 class BlindPredictor:
-    """Clean prediction interface for hidden blind evaluation: takes a raw,
-    unlabeled SMILES string and returns a Responder/Non-Responder call with
-    a confidence score. Wraps an already-fitted model + a scaler fit *only*
-    on the 29-drug training set (never refit here, by construction). Works
-    with any fitted classical or quantum model exposing `predict_proba`.
+    """A simple prediction interface for blind evaluation: takes a raw,
+    unlabeled SMILES string and returns a Responder or Non-Responder call
+    with a confidence score. Wraps an already-fitted model and a scaler
+    that was fit only on the 29 drug training set. Neither is ever refit
+    here. Works with any fitted classical or quantum model that has a
+    predict_proba method.
 
-    Note: D50 (experimental particle size) is not derivable from SMILES
-    structure alone. If the deployed model's feature set includes D50, callers
-    must supply it explicitly via `predict(smiles, d50=...)`; omitting it
-    raises rather than silently imputing a value.
+    D50 (the experimental particle size) cannot be computed from a SMILES
+    string alone. If the model's feature list includes D50, callers must
+    pass it explicitly with predict(smiles, d50=...). Leaving it out
+    raises an error rather than guessing a value.
     """
 
     def __init__(self, model, scaler: MinMaxScaler, feature_names: list[str]):
@@ -124,8 +127,8 @@ class BlindPredictor:
             if feat == "D50":
                 if d50 is None:
                     raise ValueError(
-                        "D50 is an experimental measurement, not derivable from SMILES; "
-                        "pass d50=<value> explicitly."
+                        "D50 is an experimental measurement and cannot be computed from SMILES. "
+                        "Pass d50=<value> explicitly."
                     )
                 row.append(d50)
             else:
@@ -140,10 +143,10 @@ class BlindPredictor:
 
 
 def fit_deployment_model(model_factory, X, y, feature_range=(0.0, 1.0)) -> tuple:
-    """Fit a scaler + model once on the *entire* available dataset (28+1 ->
-    all 29), for deployment behind `BlindPredictor`. Distinct from LOOCV,
-    which is for evaluation only -- the deployed model should use every
-    labeled sample available.
+    """Fit a scaler and a model once on the entire dataset, all 29 drugs,
+    for use behind BlindPredictor. This is separate from LOOCV, which is
+    only for evaluation. A model that will actually be deployed should be
+    trained on every labeled sample available, not held-out folds.
     """
     scaler = MinMaxScaler(feature_range=feature_range)
     X_scaled = scaler.fit_transform(np.asarray(X, dtype=float))

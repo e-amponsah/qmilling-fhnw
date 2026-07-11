@@ -1,5 +1,7 @@
-"""RDKit descriptor generation, leakage-safe modeling-table assembly, and
-fold-safe k-best feature selection.
+"""Builds molecular descriptors, assembles the modeling table, and selects
+features for training. Feature selection is done fold by fold so that no
+information from the held-out sample ever influences which columns are
+picked.
 """
 
 import logging
@@ -76,10 +78,12 @@ def build_modeling_table(
     dataset_path=DATASET_CSV,
     out_path=MODELING_TABLE_CSV,
 ) -> pd.DataFrame:
-    """Merge RDKit descriptors with the experimental dataset.
+    """Merge the RDKit descriptors with the experimental dataset.
 
-    Enforces the staged-leakage filter: COM_15min / PM_15min mathematically
-    define COMDR_15min and must never reach the candidate feature matrix.
+    COM_15min and PM_15min are the raw measurements that COMDR_15min is
+    computed from, so they stay in this merged table but must never be
+    passed into a model as a feature. That filtering happens in
+    get_candidate_matrix below, not here.
     """
     dataset = pd.read_csv(dataset_path)
     data = descriptors.merge(dataset, on="drug", how="inner")
@@ -94,7 +98,7 @@ def build_modeling_table(
     if PATZMANN_MISSING_COLS:
         logger.info(
             "Note: Patzmann et al. reference variable(s) %s are not present in the "
-            "provided dataset; only %s are reproducible here.",
+            "provided dataset. Only %s are reproducible here.",
             PATZMANN_MISSING_COLS, PATZMANN_APPROX_COLS,
         )
     else:
@@ -110,10 +114,9 @@ def build_modeling_table(
 
 
 def get_candidate_matrix(data: pd.DataFrame) -> pd.DataFrame:
-    """Return the leakage-free candidate feature matrix X (14 RDKit descriptors
-    + D50 + apparent_solubility).
-
-    Raises if any leakage column has somehow made it into the candidate pool.
+    """Return the candidate feature matrix: the 14 RDKit descriptors plus
+    D50 and apparent_solubility. Raises if a leakage column has somehow
+    ended up in the candidate list, as a safety check.
     """
     leaked = [c for c in LEAKAGE_COLS if c in CANDIDATE_FEATURE_COLS]
     if leaked:
@@ -122,12 +125,10 @@ def get_candidate_matrix(data: pd.DataFrame) -> pd.DataFrame:
 
 
 def _pca_cluster_topk(X_arr: np.ndarray, y_arr: np.ndarray, feature_names: np.ndarray, k: int, n_top_pcs: int = 3) -> list[str]:
-    """Rank features by univariate f_classif score, but select via
-    `redundancy_aware_topk` against PCA-derived clusters fit on the SAME
-    data passed in (caller is responsible for that data being a training
-    fold only, to stay leakage-free) -- prefers one representative per
-    latent PCA axis over blindly taking the top-k individually-scoring
-    (and often mutually redundant) descriptors.
+    """Score features with a univariate f_classif test, then pick the top k
+    using redundancy_aware_topk so that features loading on the same PCA
+    cluster do not all get picked together. The caller must pass in
+    training fold data only, since this fits a PCA model internally.
     """
     k_eff = min(k, X_arr.shape[1])
     f_scores, _ = f_classif(X_arr, y_arr)
@@ -146,27 +147,27 @@ def select_k_best_features(
     variance_threshold: float = 1e-6,
     random_state: int = RANDOM_SEED,
 ) -> dict:
-    """Fold-safe, PCA-cluster-aware automated feature selection.
+    """Automated feature selection, done separately inside each LOOCV fold.
 
-    For each candidate k in `k_range`, runs a nested LOOCV: inside every
-    outer training fold, a `VarianceThreshold` filter, an `f_classif`
-    univariate score, and a PCA fit (for redundancy clustering, see
-    `pca_analysis.py`) are all computed *only* on that fold's training data,
-    then used to score a simple downstream classifier's held-out accuracy.
-    This prevents both the feature selection step AND its PCA-based
-    redundancy guard from leaking information about the held-out sample.
+    For every candidate k in k_range, this runs a full nested LOOCV: for
+    each training fold, a VarianceThreshold filter, an f_classif score, and
+    a PCA fit (see pca_analysis.py) are all computed on that fold's training
+    data only, then used to score a simple classifier on the held-out
+    sample. This keeps both the feature selection and the PCA redundancy
+    check from ever seeing the held-out sample.
 
-    Selection prefers at most one feature per PCA-identified redundancy
-    cluster (e.g. the "size" cluster -- MolWt, Chi0v, Chi1v, Kappa1-3,
-    BertzCT -- collapses onto one latent axis; taking 4 of them adds far
-    less independent signal than picking 1 of them plus 3 unrelated
-    descriptors) before falling back to raw univariate score once every
-    cluster has contributed one feature.
+    Feature selection prefers one feature per PCA cluster before picking a
+    second feature from any cluster. For example, MolWt, Chi0v, Chi1v,
+    Kappa1, Kappa2, Kappa3, and BertzCT all measure roughly the same thing
+    (molecule size), so taking four of them barely adds more information
+    than taking one of them and using the other three slots on unrelated
+    descriptors.
 
-    Returns a dict with the best k, the score table for every k, and the
-    final feature subset chosen by fitting selection once on the *full*
-    dataset (used for production / final reporting, not for the LOOCV model
-    evaluation itself -- `evaluation.py` must re-fit selection per fold).
+    Returns a dict with the best k, the LOOCV score for every k, and the
+    final feature list chosen by running selection once on the full
+    dataset. That final list is for reporting and for models with a fixed
+    input size (like the 6 qubit QCNN). Any actual model evaluation must
+    redo selection per fold using the nested loop above, not this final list.
     """
     X_arr = X.values
     y_arr = y.values
@@ -203,11 +204,9 @@ def select_k_best_features(
 
     best_k = max(scores_by_k, key=scores_by_k.get)
 
-    # Final selection fit on the full dataset -- for reporting the chosen
-    # feature names only (and to hand fixed-qubit-count models, e.g. the
-    # 6-qubit QCNN, an exact-k subset even when it isn't the LOOCV-optimal
-    # k). Any actual model evaluation must redo selection per-fold (see
-    # the nested-LOOCV above) to stay leakage-free.
+    # Fit selection once more on the full dataset, just to report which
+    # feature names were chosen and to give the QCNN a fixed 6 feature
+    # list. This is not used for scoring any model.
     vt = VarianceThreshold(threshold=variance_threshold)
     X_vt = vt.fit_transform(X_arr)
     kept_names = feature_names[vt.get_support()]
@@ -227,20 +226,20 @@ def select_k_best_features(
 def get_modeling_features(
     X: pd.DataFrame, y: pd.Series, k_range: tuple[int, int] = FEATURE_SELECT_K_RANGE, **kwargs
 ) -> dict:
-    """Feature-selection entry point used by main.py / notebooks.
+    """Main feature selection entry point, used by main.py and the notebooks.
 
-    Honors a manual `MANUAL_FEATURES` override (set in `.env`, see
-    `src/config.py`) when present -- e.g. after eyeballing
-    `plots/feature_correlation_heatmap.png` and picking your own columns --
-    otherwise falls back to the automated fold-safe `select_k_best_features`
-    sweep. Always returns the same shape (`source`, `best_k`, `scores_by_k`,
-    `selected_features`, `features_by_k`) so callers never need to branch on
-    which path was taken.
+    If MANUAL_FEATURES is set in .env, that list is used directly instead
+    of running automated selection. This is useful after looking at
+    plots/feature_correlation_heatmap.png and deciding on your own columns.
+    Otherwise this falls back to select_k_best_features above.
 
-    `features_by_k[6]` is always populated, falling back to an automated
-    6-best selection if the manual list isn't exactly 6 features, since the
-    fixed 6-qubit QCNN needs an exact 6-feature subset regardless of how the
-    other models' features were chosen.
+    Either way, the return value has the same shape (source, best_k,
+    scores_by_k, selected_features, features_by_k), so callers do not need
+    to know which path was taken.
+
+    features_by_k[6] is always filled in, even in manual mode with a
+    different number of features, because the QCNN model needs exactly 6
+    qubits and falls back to an automated 6 feature selection on its own.
     """
     from src.config import MANUAL_FEATURES
 
@@ -256,8 +255,8 @@ def get_modeling_features(
         features_by_k = {len(MANUAL_FEATURES): list(MANUAL_FEATURES)}
         if len(MANUAL_FEATURES) != 6:
             logger.info(
-                "MANUAL_FEATURES has %d feature(s), not 6 -- the fixed 6-qubit "
-                "QCNN will fall back to an automated 6-best selection instead.",
+                "MANUAL_FEATURES has %d feature(s), not 6, so the QCNN model "
+                "(which needs exactly 6 qubits) will use an automated 6 feature selection instead.",
                 len(MANUAL_FEATURES),
             )
             features_by_k[6] = select_k_best_features(X, y, k_range=(6, 6))["features_by_k"][6]

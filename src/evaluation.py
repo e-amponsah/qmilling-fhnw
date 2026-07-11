@@ -143,43 +143,6 @@ def kernel_target_alignment(K: np.ndarray, y: np.ndarray) -> float:
     return float(num / den) if den > 0 else 0.0
 
 
-def continuous_kernel_target_alignment(K: np.ndarray, y: np.ndarray) -> float:
-    """Continuous-target counterpart of `kernel_target_alignment`, for
-    regression rather than classification (used by
-    `TrainedQuantumKernelRidgeRegression`).
-
-    The classification version compares K to the ideal kernel
-    y_signed @ y_signed.T, where y_signed is +-1. There is no natural
-    +-1 label for a continuous target, so this instead uses the ideal
-    kernel Y = y_c @ y_c.T, where y_c = y - mean(y) is the centered
-    target. Y[i, j] = y_c[i] * y_c[j] is positive and large when i and j
-    deviate from the target's mean in the SAME direction (both high or
-    both low responders), negative when they deviate in OPPOSITE
-    directions, and near zero whenever either sits close to the mean.
-    Maximizing alignment with Y therefore pushes a kernel toward giving
-    high fidelity to pairs that deviate similarly and low fidelity to
-    pairs that deviate oppositely -- the geometry a downstream
-    KernelRidge head needs in order to interpolate y from its neighbours.
-
-    K is double-centered (Cortes et al., 2012) before comparison, removing
-    any constant kernel-wide offset (e.g. a fidelity kernel's
-    diagonal-heavy bias) that would otherwise dominate a raw, uncentered
-    alignment. Y needs no separate centering: since y_c already has zero
-    mean, every row/column mean of y_c @ y_c.T is already exactly zero, so
-    double-centering it would be a no-op.
-    """
-    y_c = np.asarray(y, dtype=float) - np.mean(y)
-    Y = np.outer(y_c, y_c)
-
-    n = K.shape[0]
-    ones_over_n = np.full((n, n), 1.0 / n)
-    K_c = K - ones_over_n @ K - K @ ones_over_n + ones_over_n @ K @ ones_over_n
-
-    num = np.sum(K_c * Y)
-    den = np.sqrt(np.sum(K_c * K_c) * np.sum(Y * Y))
-    return float(num / den) if den > 0 else 0.0
-
-
 def summarize_results(results_by_model: dict[str, dict], kind: str = "classification") -> pd.DataFrame:
     """Turn a dict of model name to loocv_evaluate() output into one table."""
     rows = []

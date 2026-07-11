@@ -1383,3 +1383,69 @@
 19:02:35 | Trained kernel KTA for this fold, before and after training: 0.2317 -> 0.3014
 19:03:31 | Trained kernel KTA for this fold, before and after training: 0.2292 -> 0.3088
 19:04:27 | Trained kernel KTA for this fold, before and after training: 0.2298 -> 0.2991
+19:05:24 | Trained kernel KTA for this fold, before and after training: 0.2348 -> 0.3169
+19:06:20 | Trained kernel KTA for this fold, before and after training: 0.2295 -> 0.3002
+19:07:15 | Trained kernel KTA for this fold, before and after training: 0.2334 -> 0.3125
+19:08:11 | Trained kernel KTA for this fold, before and after training: 0.2461 -> 0.3118
+19:09:06 | Trained kernel KTA for this fold, before and after training: 0.2336 -> 0.2985
+19:10:02 | Trained kernel KTA for this fold, before and after training: 0.2750 -> 0.3696
+19:10:58 | Trained kernel KTA for this fold, before and after training: 0.2586 -> 0.3435
+19:11:53 | Trained kernel KTA for this fold, before and after training: 0.2356 -> 0.3062
+19:12:48 | Trained kernel KTA for this fold, before and after training: 0.2312 -> 0.3045
+19:13:43 | Trained kernel KTA for this fold, before and after training: 0.2344 -> 0.3213
+19:14:38 | Trained kernel KTA for this fold, before and after training: 0.2240 -> 0.2891
+19:15:34 | Trained kernel KTA for this fold, before and after training: 0.2311 -> 0.3029
+19:16:30 | Trained kernel KTA for this fold, before and after training: 0.2265 -> 0.2909
+19:17:26 | Trained kernel KTA for this fold, before and after training: 0.2300 -> 0.3015
+19:18:22 | Trained kernel KTA for this fold, before and after training: 0.2205 -> 0.2926
+19:19:18 | Trained kernel KTA for this fold, before and after training: 0.2168 -> 0.2958
+19:20:14 | Trained kernel KTA for this fold, before and after training: 0.2134 -> 0.2899
+19:34:41 | Trained kernel KTA for this fold, before and after training: 0.2297 -> 0.3035
+19:35:37 | Trained kernel KTA for this fold, before and after training: 0.2298 -> 0.3017
+19:36:32 | Trained kernel KTA for this fold, before and after training: 0.2228 -> 0.2947
+19:37:27 | Trained kernel KTA for this fold, before and after training: 0.2220 -> 0.2926
+19:37:27 |   QK-SVM_trained -> accuracy=0.793 f1=0.750 (1618.6s)
+19:37:27 | Running quantum classifier: VQC (backend=aer_simulator)
+19:39:37 |   VQC -> accuracy=0.897 f1=0.880 (129.3s)
+19:39:37 | === 6-RDKit: quantum regression (['QK-KRR_angle', 'VQR_spsa_cobyla', 'QK-KRR_trained']) ===
+19:39:37 | QuantumExecutor ready | backend=aer_simulator | shots=4096
+19:39:37 | Running quantum regressor: QK-KRR_angle (backend=aer_simulator, target=log(COMDR_15min))
+19:39:38 | QK-KRR fold fit | feature_map=angle alpha=1 | ||K||_F=10.771 eff_rank=11.54
+19:39:39 | QK-KRR fold fit | feature_map=angle alpha=1 | ||K||_F=11.092 eff_rank=11.09
+19:39:40 | QK-KRR fold fit | feature_map=angle alpha=1 | ||K||_F=10.675 eff_rank=11.74
+19:39:41 | QK-KRR fold fit | feature_map=angle alpha=0.1 | ||K||_F=11.026 eff_rank=11.27
+19:39:43 | QK-KRR fold fit | feature_map=angle alpha=1 | ||K||_F=10.895 eff_rank=11.41
+19:39:44 | QK-KRR fold fit | feature_map=angle alpha=1 | ||K||_F=11.136 eff_rank=10.95
+19:39:45 | QK-KRR fold fit | feature_map=angle alpha=1 | ||K||_F=10.537 eff_rank=11.86
+19:39:46 | QK-KRR fold fit | feature_map=angle alpha=1 | ||K||_F=11.021 eff_rank=11.21
+19:39:48 | QK-KRR fold fit | feature_map=angle alpha=1 | ||K||_F=10.801 eff_rank=11.50
+19:39:49 | QK-KRR fold fit | feature_map=angle alpha=0.1 | ||K||_F=10.776 eff_rank=11.57
+19:39:50 | QK-KRR fold fit | feature_map=angle alpha=1 | ||K||_F=10.788 eff_rank=11.51
+19:39:51 | QK-KRR fold fit | feature_map=angle alpha=0.1 | ||K||_F=9.519 eff_rank=13.63
+19:39:53 | QK-KRR fold fit | feature_map=angle alpha=1 | ||K||_F=10.913 eff_rank=11.38
+19:39:54 | QK-KRR fold fit | feature_map=angle alpha=1 | ||K||_F=10.584 eff_rank=11.81
+19:39:55 | QK-KRR fold fit | feature_map=angle alpha=1 | ||K||_F=10.623 eff_rank=11.68
+19:39:56 | QK-KRR fold fit | feature_map=angle alpha=0.1 | ||K||_F=10.817 eff_rank=11.60
+19:39:57 | QK-KRR fold fit | feature_map=angle alpha=1 | ||K||_F=10.908 eff_rank=11.33
+19:39:59 | QK-KRR fold fit | feature_map=angle alpha=0.1 | ||K||_F=10.854 eff_rank=11.48
+19:40:00 | QK-KRR fold fit | feature_map=angle alpha=1 | ||K||_F=10.837 eff_rank=11.47
+19:40:01 | QK-KRR fold fit | feature_map=angle alpha=1 | ||K||_F=11.132 eff_rank=11.01
+19:40:02 | QK-KRR fold fit | feature_map=angle alpha=0.1 | ||K||_F=10.743 eff_rank=11.66
+19:40:03 | QK-KRR fold fit | feature_map=angle alpha=1 | ||K||_F=11.043 eff_rank=11.17
+19:40:05 | QK-KRR fold fit | feature_map=angle alpha=1 | ||K||_F=10.679 eff_rank=11.59
+19:40:06 | QK-KRR fold fit | feature_map=angle alpha=1 | ||K||_F=10.719 eff_rank=11.64
+19:40:07 | QK-KRR fold fit | feature_map=angle alpha=1 | ||K||_F=10.598 eff_rank=11.83
+19:40:08 | QK-KRR fold fit | feature_map=angle alpha=1 | ||K||_F=10.922 eff_rank=11.26
+19:40:09 | QK-KRR fold fit | feature_map=angle alpha=0.1 | ||K||_F=10.875 eff_rank=11.41
+19:40:10 | QK-KRR fold fit | feature_map=angle alpha=1 | ||K||_F=10.790 eff_rank=11.47
+19:40:12 | QK-KRR fold fit | feature_map=angle alpha=1 | ||K||_F=10.819 eff_rank=11.48
+19:40:13 | QK-KRR fold fit | feature_map=angle alpha=0.1 | ||K||_F=11.241 eff_rank=11.54
+19:40:16 |   QK-KRR_angle -> q2=0.192 r2=0.959 mae=3.049 rmse=6.342 (35.0s)
+19:40:16 | Running quantum regressor: VQR_spsa_cobyla (backend=aer_simulator, target=log(COMDR_15min))
+19:45:28 |   VQR_spsa_cobyla -> q2=0.575 r2=0.862 mae=2.616 rmse=5.488 (267.0s)
+19:45:28 | Running quantum regressor: QK-KRR_trained (backend=aer_simulator, target=log(COMDR_15min))
+19:46:25 | QK-KRR-trained fold fit | KTA_reg=0.3101 -> 0.3793 | alpha=0.01
+19:47:22 | QK-KRR-trained fold fit | KTA_reg=0.2882 -> 0.3399 | alpha=0.01
+19:48:19 | QK-KRR-trained fold fit | KTA_reg=0.3104 -> 0.3791 | alpha=0.01
+19:50:31 | QK-KRR-trained fold fit | KTA_reg=0.2852 -> 0.3628 | alpha=0.01
+19:51:26 | QK-KRR-trained fold fit | KTA_reg=0.3051 -> 0.3783 | alpha=0.01

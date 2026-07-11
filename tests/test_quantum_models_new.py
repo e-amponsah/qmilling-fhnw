@@ -1,5 +1,5 @@
 """Smoke tests for the quantum regression suite added on top of the core
-classification suite: QK-KRR, QK-KRR_trained, VQR, and QCNN-R.
+classification suite: QK-KRR, VQR, and QCNN-R.
 
 These run against a local, noiseless AerSimulator with a small shot count
 and tiny synthetic data (a handful of samples), so they finish in seconds --
@@ -16,7 +16,6 @@ from src.quantum_backend import ExecutionConfig, QuantumExecutor
 from src.quantum_models import (
     QCNNRegressor,
     QuantumKernelRidgeRegression,
-    TrainedQuantumKernelRidgeRegression,
     VariationalQuantumRegressor,
 )
 
@@ -63,21 +62,6 @@ def test_qk_krr_smoke(executor_aer, synthetic_4feature):
     assert np.all(np.isfinite(pred))
     assert model.kernel_frobenius_norm_ > 0
     assert model.kernel_effective_rank_ > 0
-
-
-def test_qk_krr_trained_smoke(executor_aer, synthetic_4feature):
-    """QK-KRR_trained optimizes its feature map's weights against
-    continuous KTA before fitting KernelRidge, and that optimization
-    should raise alignment above its untrained starting point.
-    """
-    X, y_reg = synthetic_4feature
-    model = TrainedQuantumKernelRidgeRegression(executor=executor_aer, n_layers=2, maxiter=5, alpha_grid=(1.0,))
-    model.fit(X[:5], y_reg[:5])
-    pred = model.predict(X[5:])
-
-    assert pred.shape == (1,)
-    assert np.all(np.isfinite(pred))
-    assert model.kta_after_ >= model.kta_before_
 
 
 def test_vqr_output_range(executor_aer, synthetic_4feature):

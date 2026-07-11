@@ -703,131 +703,6 @@ class QuantumKernelRidgeRegression:
         return r2_score(y, self.predict(X))
 
 
-# --- 5b. Trained (KTA_reg-optimized) Quantum Kernel Ridge Regression ---------
-
-class TrainedQuantumKernelRidgeRegression:
-    """QK-KRR whose feature map has its own trainable weight parameters,
-    optimized via COBYLA to maximize a continuous-target Kernel Target
-    Alignment (`continuous_kernel_target_alignment`) against the training
-    fold's labels, before `KernelRidge` is fit on the resulting kernel --
-    the regression counterpart of `TrainedQuantumKernelSVM`.
-
-    Mirrors `TrainedQuantumKernelSVM`'s two-stage structure exactly: stage
-    1 trains the kernel's own geometry against KTA_reg (never seeing the
-    held-out LOOCV sample, since `fit` only ever runs on a training fold),
-    stage 2 fits a classical regression head on the now-fixed kernel --
-    reusing the same normalization and inner alpha-sweep machinery as
-    `QuantumKernelRidgeRegression` (`_normalize_fidelity_kernel`,
-    `_select_alpha_via_inner_loocv`).
-
-    Parameters
-    ----------
-    executor : QuantumExecutor
-    n_layers : int, default=3
-        `reuploading_layer` depth. Kept at the value already found optimal
-        for `TrainedQuantumKernelSVM`'s classification KTA (swept 1-5
-        there; see its docstring) rather than independently re-swept for
-        regression -- a reasonable starting point since both use the same
-        circuit family and the same ~28-29-sample regime, but worth
-        revisiting with its own sweep if LOOCV shows clear under/overfitting.
-    maxiter : int, default=30
-        COBYLA iterations for the KTA_reg optimization. Kept low for the
-        same reason as `QK-SVM_trained`'s registry entry: this stage
-        recomputes a full O(n^2) kernel matrix in real circuits on every
-        iteration, far more expensive per step than a plain BCE/MSE
-        evaluation.
-    alpha, alpha_grid : see `QuantumKernelRidgeRegression`.
-
-    Attributes
-    ----------
-    kta_before_, kta_after_ : float
-        Continuous-target KTA on the training fold, before and after
-        optimizing theta.
-    alpha_ : float
-        Alpha selected by the inner sweep on the trained kernel.
-    """
-
-    def __init__(
-        self,
-        executor: QuantumExecutor,
-        n_layers: int = 3,
-        maxiter: int = 30,
-        alpha: float = 0.1,
-        alpha_grid: tuple[float, ...] = (0.01, 0.1, 1.0),
-        random_state: int = RANDOM_SEED,
-    ):
-        self.executor = executor
-        self.n_layers = n_layers
-        self.maxiter = maxiter
-        self.alpha = alpha
-        self.alpha_grid = alpha_grid
-        self.random_state = random_state
-        self._qc = None
-        self._x_params = None
-        self._theta_params = None
-        self._theta_opt = None
-        self._X_train = None
-        self._K_diag_train = None
-        self._krr = None
-        self.alpha_ = alpha
-        self.kta_before_ = None
-        self.kta_after_ = None
-
-    def _kernel_for_theta(self, X: np.ndarray, theta: np.ndarray) -> np.ndarray:
-        qc_bound_theta = self._qc.assign_parameters(dict(zip(self._theta_params, theta)))
-        return _fidelity_kernel_via_backend(self.executor, qc_bound_theta, self._x_params, X, X, symmetric=True)
-
-    def fit(self, X: np.ndarray, y: np.ndarray) -> "TrainedQuantumKernelRidgeRegression":
-        from src.evaluation import continuous_kernel_target_alignment
-
-        X = np.asarray(X, dtype=float)
-        y = np.asarray(y, dtype=float)
-        n_features = X.shape[1]
-        self._qc, self._x_params, self._theta_params = reuploading_layer(n_features, self.n_layers)
-        self._X_train = X
-
-        rng = np.random.RandomState(self.random_state)
-        theta0 = rng.uniform(0, 2 * np.pi, size=len(self._theta_params))
-
-        def neg_kta(theta):
-            K = self._kernel_for_theta(X, theta)
-            return -continuous_kernel_target_alignment(K, y)
-
-        self.kta_before_ = -neg_kta(theta0)
-        res = minimize(neg_kta, theta0, method="COBYLA", options={"maxiter": self.maxiter, "rhobeg": 0.8})
-        self._theta_opt = res.x
-        self.kta_after_ = -neg_kta(self._theta_opt)
-
-        K_train = self._kernel_for_theta(X, self._theta_opt)
-        self._K_diag_train = np.clip(np.diag(K_train), 1e-12, None)
-        K_norm = _normalize_fidelity_kernel(K_train, self._K_diag_train, self._K_diag_train)
-
-        self.alpha_ = _select_alpha_via_inner_loocv(K_norm, y, self.alpha_grid, self.alpha)
-        self._krr = KernelRidge(kernel="precomputed", alpha=self.alpha_)
-        self._krr.fit(K_norm, y)
-        logger.info(
-            "QK-KRR-trained fold fit | KTA_reg=%.4f -> %.4f | alpha=%.3g",
-            self.kta_before_, self.kta_after_, self.alpha_,
-        )
-        return self
-
-    def _kernel_to_train(self, X: np.ndarray) -> np.ndarray:
-        X = np.asarray(X, dtype=float)
-        qc_bound_theta = self._qc.assign_parameters(dict(zip(self._theta_params, self._theta_opt)))
-        K = _fidelity_kernel_via_backend(
-            self.executor, qc_bound_theta, self._x_params, X, self._X_train, symmetric=False
-        )
-        K_self = _fidelity_kernel_via_backend(self.executor, qc_bound_theta, self._x_params, X, X, symmetric=True)
-        diag_test = np.clip(np.diag(K_self), 1e-12, None)
-        return _normalize_fidelity_kernel(K, diag_test, self._K_diag_train)
-
-    def predict(self, X: np.ndarray) -> np.ndarray:
-        return self._krr.predict(self._kernel_to_train(X))
-
-    def score(self, X: np.ndarray, y: np.ndarray) -> float:
-        return r2_score(y, self.predict(X))
-
-
 # --- 6. Multi-observable quantum regressors (VQR, QCNN-R) --------------------
 
 class _MultiObservableRegressorCore:
@@ -1001,8 +876,7 @@ class QCNNRegressor(_MultiObservableRegressorCore):
     qubits' <Z> expectation values (instead of thresholding a single
     qubit's P(|1>) into a class) and combining them with a classical Ridge
     head. This gives the existing QCNN a direct regression counterpart,
-    rounding out the regression suite to 4 models: QK-KRR, QK-KRR_trained,
-    VQR, and QCNN-R.
+    rounding out the regression suite to 3 models: QK-KRR, VQR, and QCNN-R.
 
     Requires exactly `n_qubits` (default 6) input features, same fixed-size
     constraint as `QCNNClassifier` -- run it on the dedicated 6-feature
@@ -1103,13 +977,6 @@ QUANTUM_REGRESSION_MODEL_BUILDERS = {
     ),
     "QCNN-R": lambda executor: QCNNRegressor(
         executor=executor, n_qubits=6, maxiter_spsa=50, maxiter_cobyla=20
-    ),
-    # n_layers=3 kept unchanged from TrainedQuantumKernelSVM's own sweep
-    # (see TrainedQuantumKernelRidgeRegression's docstring) rather than
-    # independently re-swept for regression; maxiter=30 for the same
-    # per-iteration-cost tradeoff as QK-SVM_trained above.
-    "QK-KRR_trained": lambda executor: TrainedQuantumKernelRidgeRegression(
-        executor=executor, n_layers=3, maxiter=30
     ),
 }
 

@@ -343,9 +343,6 @@ def plot_circuit_diagrams(n_features: int, n_qcnn_features: int = 6) -> None:
     registered quantum model (classification + regression), each saved
     under a filename that names the model(s) that use it.
 
-    QK-SVM_trained and QK-KRR_trained share an identical circuit shape
-    (`reuploading_layer(n_features, n_layers=3)`) -- drawn once and saved
-    under both model-specific filenames, rather than re-drawn per model.
     `zz_feature_map` / `entangled_feature_map` stay in the Task 3 kernel
     comparison below even though no classifier currently uses them by
     that name, since that comparison is about encoding geometry, not
@@ -356,8 +353,7 @@ def plot_circuit_diagrams(n_features: int, n_qcnn_features: int = 6) -> None:
     zz_circ = FEATURE_MAPS["zz"](n_features)[0]
     zzplus_circ = FEATURE_MAPS["zzplus"](n_features)[0]
     vqc_circ = build_vqc_circuit(n_features, n_layers=2)[0]
-    # Shared by QK-SVM_trained and QK-KRR_trained (same n_layers=3
-    # reuploading_layer circuit family).
+    # QK-SVM_trained's own kernel feature map (n_layers=3 reuploading_layer).
     reuploading_circ = reuploading_layer(n_features, n_layers=3)[0]
     vqr_circ = build_regression_circuit(n_features, n_layers=1, n_output_qubits=3)[0]
     qcnn_circ = build_qcnn_circuit(n_qcnn_features)[0]
@@ -378,7 +374,6 @@ def plot_circuit_diagrams(n_features: int, n_qcnn_features: int = 6) -> None:
         "qk_svm_angle_kernel": angle_circ,
         "qk_svm_trained_kernel": reuploading_circ,
         "qk_krr_angle_kernel": angle_circ,
-        "qk_krr_trained_kernel": reuploading_circ,
         "qcnn_regressor": qcnn_circ,
     }
     for name, circ in circuits.items():
@@ -499,7 +494,7 @@ def stage_quantum_classification(
 def stage_quantum_regression(
     data: pd.DataFrame, selection: dict, execution_config: ExecutionConfig, max_samples: int | None
 ) -> dict:
-    """Quantum regressors only (QK-KRR, QK-KRR_trained, VQR, QCNN-R),
+    """Quantum regressors only (QK-KRR, VQR, QCNN-R),
     predicting COMDR_15min directly -- comparable to the Patzmann
     Q^2=0.77 / R^2=0.82 benchmark. Runnable standalone via
     `--stage quantum-regression`. QCNN-R shares QCNN's fixed-6-qubit

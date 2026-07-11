@@ -50,3 +50,23 @@ NumHAcceptors         -0.000125
 21:35:41 | INFO | IBM Runtime job submitted | job_id=d999m30tcv6s73dn1m50 | backend=ibm_runtime[ibm_miami] | if this process is interrupted, recover its results later with recover_ibm_job_counts('d999m30tcv6s73dn1m50')
 21:35:41 | INFO | IBM Runtime job d999m30tcv6s73dn1m50 | status=QUEUED | elapsed=0s
 21:35:56 | INFO | IBM Runtime job d999m30tcv6s73dn1m50 | status=RUNNING | elapsed=15s
+21:53:52 | INFO | IBM Runtime job d999m30tcv6s73dn1m50 | status=CANCELLED | elapsed=1091s
+Traceback (most recent call last):
+  File "/Users/goni/OQI-Hackathon-2026----FNHW-/main.py", line 696, in <module>
+    main()
+    ~~~~^^
+  File "/Users/goni/OQI-Hackathon-2026----FNHW-/main.py", line 685, in main
+    quantum_results = stage_quantum(data, selection, execution_config, args.max_samples)
+  File "/Users/goni/OQI-Hackathon-2026----FNHW-/main.py", line 534, in stage_quantum
+    quantum_results = stage_quantum_classification(data, selection, execution_config, max_samples)
+  File "/Users/goni/OQI-Hackathon-2026----FNHW-/main.py", line 453, in stage_quantum_classification
+    K = compute_quantum_kernel_matrix(X_scaled, kernel_executor, feature_map_name=fm_name)
+  File "/Users/goni/OQI-Hackathon-2026----FNHW-/src/quantum_models.py", line 126, in compute_quantum_kernel_matrix
+    return _fidelity_kernel_via_backend(executor, qc, x_params, X, X, symmetric=True)
+  File "/Users/goni/OQI-Hackathon-2026----FNHW-/src/quantum_models.py", line 104, in _fidelity_kernel_via_backend
+    counts_list = executor.run_counts_batch(circuits)
+  File "/Users/goni/OQI-Hackathon-2026----FNHW-/src/quantum_backend.py", line 155, in run_counts_batch
+    result = self._wait_for_ibm_job(job)
+  File "/Users/goni/OQI-Hackathon-2026----FNHW-/src/quantum_backend.py", line 212, in _wait_for_ibm_job
+    raise RuntimeError(f"IBM Runtime job {job_id} was cancelled.")
+RuntimeError: IBM Runtime job d999m30tcv6s73dn1m50 was cancelled.

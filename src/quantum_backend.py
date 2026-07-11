@@ -127,17 +127,62 @@ class QuantumExecutor:
         raise ValueError(f"Unknown ExecutionConfig.mode: {self.config.mode}")
 
     def run_counts_batch(self, circuits: list[QuantumCircuit]) -> list[dict[str, int]]:
-        """Transpile and submit every circuit in one Sampler job, then
-        return a list of measurement count dictionaries in the same order
-        as the input circuits.
+        """Transpile and submit every circuit in as few Sampler jobs as
+        possible, then return a list of measurement count dictionaries in
+        the same order as the input circuits.
 
         Batching all the circuits needed for one LOOCV fold, or one full
         kernel matrix, into a single job is what makes running on a real
         or cloud queued backend practical. Submitting one job per circuit
-        would be far too slow.
+        would be far too slow. But a real backend caps how many circuits
+        one job can hold (`backend.configuration().max_experiments`) --
+        exceeding it does not raise a clean client-side error, the job can
+        sit in RUNNING for a long time and then get silently CANCELLED
+        server-side with no error message. When `circuits` is larger than
+        that cap (routine for a 29x29 kernel matrix -- 435 circuits -- on a
+        backend capped at 75), this splits it into consecutive sub-batches
+        of at most that size, submits each as its own job in turn, and
+        concatenates their results. AerSimulator has no such practical
+        limit, so this is a no-op (one job, like before) outside
+        mode="ibm_runtime".
         """
         if not circuits:
             return []
+        max_per_job = self._max_circuits_per_job()
+        if max_per_job is None or len(circuits) <= max_per_job:
+            return self._submit_and_wait(circuits)
+
+        chunks = [circuits[i:i + max_per_job] for i in range(0, len(circuits), max_per_job)]
+        logger.info(
+            "Batch of %d circuits exceeds backend limit (max_experiments=%d) -- "
+            "splitting into %d sequential job(s).",
+            len(circuits), max_per_job, len(chunks),
+        )
+        counts_list = []
+        for i, chunk in enumerate(chunks, 1):
+            logger.info("Submitting chunk %d/%d (%d circuits)...", i, len(chunks), len(chunk))
+            counts_list.extend(self._submit_and_wait(chunk))
+        return counts_list
+
+    def _max_circuits_per_job(self) -> int | None:
+        """The backend's hard cap on circuits (PUBs) per Sampler job, or
+        None if unknown/not applicable (local simulators). Only queried
+        for mode="ibm_runtime" -- AerSimulator effectively has no such
+        limit for the batch sizes this project ever submits.
+        """
+        if self.config.mode != "ibm_runtime":
+            return None
+        try:
+            max_experiments = self.backend.configuration().max_experiments
+            return int(max_experiments) if max_experiments else None
+        except Exception:
+            return None
+
+    def _submit_and_wait(self, circuits: list[QuantumCircuit]) -> list[dict[str, int]]:
+        """Transpile, submit, and wait for exactly ONE Sampler job (already
+        assumed to respect the backend's max_experiments cap), returning
+        its decoded counts in submission order.
+        """
         transpiled = self._pm.run(circuits)
         job = self.sampler.run(transpiled, shots=self.config.shots)
 

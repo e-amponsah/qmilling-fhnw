@@ -2,18 +2,30 @@
 
 Reads one normalized JSON per model from a results directory (written by
 `src.evaluation.save_results_json`, called automatically by every
-`main.py` classification/regression stage) and renders six figures:
+`main.py` classification/regression stage) and renders eight figures:
 
-    1. classification_comparison   -- F1 / recall_1 / accuracy, grouped bars
-    2. roc_comparison              -- ROC curves + AUC, every classifier on one axis
-    3. regression_comparison       -- Q^2 vs RMSE, two panels (never one dual-axis plot)
-    4. per_drug_regression_scatter -- predicted vs. true COMDR15, LOOCV
+    1. classification_comparison       -- F1 / recall_1 / accuracy, grouped bars
+    2. roc_comparison                  -- ROC curves + AUC, every classifier on one axis
+    3. regression_comparison           -- Q^2 and RMSE, two panels (never one dual-axis plot)
+    4. per_drug_regression_scatter     -- predicted vs. true COMDR15, LOOCV
     5. per_drug_classification_heatmap -- correct/wrong per model per drug
-    6. kta_comparison               -- fixed feature maps vs. the trained kernel's
-                                        KTA before/after optimization (needs the
-                                        kernel_kta_by_feature_map.csv / kta_optimization.csv
-                                        that main.py's quantum-classification / bonus
-                                        stages write into --results_dir)
+    6. confusion_matrices_classical    -- one 2x2 confusion matrix per classical model
+    7. confusion_matrices_quantum      -- one 2x2 confusion matrix per quantum model
+    8. kta_comparison                  -- fixed feature maps vs. the trained kernel's
+                                           KTA before/after optimization (needs the
+                                           kernel_kta_by_feature_map.csv / kta_optimization.csv
+                                           that main.py's quantum-classification / bonus
+                                           stages write into --results_dir)
+
+Every figure marks classical vs. quantum unambiguously through at least
+three redundant channels at once (never just one): a solid colored zone
+band with a bold "CLASSICAL ML" / "QUANTUM ML" header, a thick divider
+line between the two groups, and paradigm-colored axis tick labels. A
+"Δ" callout box states the classical-vs-quantum gap as a single signed
+number, so the comparison never depends on eyeballing bar heights alone.
+roc_comparison carries the same paradigm split through a fourth channel
+instead (solid vs. dashed line style), since it needs more than two
+colors on screen at once for individual model identity.
 
 Each JSON has the shape:
     {
@@ -47,8 +59,9 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import seaborn as sns
-from matplotlib.colors import LinearSegmentedColormap, ListedColormap
-from sklearn.metrics import roc_auc_score, roc_curve
+from matplotlib.colors import ListedColormap
+from matplotlib.patches import Patch
+from sklearn.metrics import confusion_matrix, roc_auc_score, roc_curve
 
 # --- Project model registry ---------------------------------------------
 # Kept in sync by hand with QUANTUM_MODEL_BUILDERS / QUANTUM_REGRESSION_MODEL_BUILDERS
@@ -64,51 +77,30 @@ REGRESSION_QUANTUM_MODELS = ["QK-KRR_angle", "VQR_spsa_cobyla", "QCNN-R"]
 PATZMANN_Q2_BENCHMARK = 0.77
 CLASSIFICATION_THRESHOLD = 2.0  # COMDR15 > 2.0 => Responder (challenge brief, Eq. 2)
 
-# --- Palette -------------------------------------------------------------
-# A validated categorical palette (fixed order = the CVD-safety mechanism --
-# never cycled, never reassigned by rank/filter). Slot 1 (blue) and slot 8
-# (orange) double as the two-family "classical vs quantum" identity used for
-# zone shading and the accuracy/Q^2 bars, matching this script's original
-# blue/orange convention; the full 8-slot order is used wherever every
-# individual model needs its own identity (the ROC comparison).
-PALETTE_CATEGORICAL = [
-    "#2a78d6",  # 1 blue
-    "#1baf7a",  # 2 aqua
-    "#eda100",  # 3 yellow
-    "#008300",  # 4 green
-    "#4a3aa7",  # 5 violet
-    "#e34948",  # 6 red
-    "#e87ba4",  # 7 magenta
-    "#eb6834",  # 8 orange
-]
-COLOR_CLASSICAL_ZONE = PALETTE_CATEGORICAL[0]  # blue: classical-model identity
-COLOR_QUANTUM_ZONE = PALETTE_CATEGORICAL[7]    # orange: quantum-model identity
-COLOR_PATZMANN = "#0b0b0b"       # primary ink -- reference/benchmark lines
-COLOR_MUTED = "#898781"          # muted ink -- chance lines, secondary annotations
-COLOR_GRID = "#e1e0d9"           # hairline gridline, one shade off the surface
+# One unambiguous color pair, used everywhere a model's paradigm needs to
+# read out at a glance: zone bands, header text, tick labels, panel
+# borders, legend swatches. Never used for anything else, so "blue" and
+# "orange/red" mean exactly one thing in every figure this script makes.
+COLOR_CLASSICAL = "#2E5FA3"   # strong blue: classical ML
+COLOR_QUANTUM = "#D2691E"     # strong burnt orange: quantum ML
+COLOR_PATZMANN = "black"
+COLOR_MUTED = "#8c8c8c"       # neutral grey: chance lines, fixed (non-paradigm) reference bars
 
-TITLE_FONTSIZE = 14
+# Distinct per-model line colors for roc_comparison, the one figure that
+# needs more than two identities on screen at once -- every other chart
+# here only ever needs the classical/quantum family color. Not tied to
+# COLOR_CLASSICAL/COLOR_QUANTUM, since ROC's family signal is carried by
+# line style (solid/dashed) instead. Fixed order, never cycled.
+ROC_LINE_COLORS = [
+    "#2a78d6", "#1baf7a", "#eda100", "#008300",
+    "#4a3aa7", "#e34948", "#e87ba4", "#eb6834",
+]
+
+TITLE_FONTSIZE = 15
 LABEL_FONTSIZE = 12
 TICK_FONTSIZE = 10
+HEADER_FONTSIZE = 12
 DPI = 300
-
-
-def _style_axis(ax: plt.Axes, y_grid: bool = True) -> None:
-    """Shared professional-chart chrome: hairline hyaline gridlines instead
-    of matplotlib's default heavy border, no top/right spine (nothing to
-    frame), and muted tick labels -- applied to every plot in this module
-    so the six figures read as one consistent, deliberately designed set
-    rather than six independently-styled ad hoc charts.
-    """
-    ax.spines["top"].set_visible(False)
-    ax.spines["right"].set_visible(False)
-    for side in ("left", "bottom"):
-        ax.spines[side].set_color(COLOR_GRID)
-        ax.spines[side].set_linewidth(0.9)
-    if y_grid:
-        ax.yaxis.grid(True, color=COLOR_GRID, linewidth=0.9, zorder=0)
-    ax.set_axisbelow(True)
-    ax.tick_params(colors=COLOR_MUTED, labelsize=TICK_FONTSIZE)
 
 
 def load_results(results_dir: str, model_names: list[str] | None = None) -> dict[str, dict]:
@@ -163,15 +155,57 @@ def _save_fig(fig: plt.Figure, output_dir: Path, basename: str) -> None:
     print(f"Saved {png_path} and {pdf_path}")
 
 
-def _shade_group_zones(ax: plt.Axes, n_classical: int, n_total: int) -> None:
-    """Faint background shading marking the classical-model x-range (blue)
-    vs. the quantum-model x-range (orange), so the two groups are visually
-    separated without needing a second color scheme for the bars themselves.
+def _mark_paradigm_zones(ax: plt.Axes, n_classical: int, n_total: int) -> None:
+    """Three redundant, unmistakable markers of the classical/quantum split
+    along the x-axis: a solid colored background band per zone, a bold
+    "CLASSICAL ML" / "QUANTUM ML" header text pinned to the top of each
+    band, and a thick black divider line at the boundary between them.
+    Deliberately stronger than a subtle tint -- this needs to read
+    correctly even in a quick glance or a small thumbnail.
     """
     if n_classical > 0:
-        ax.axvspan(-0.5, n_classical - 0.5, color=COLOR_CLASSICAL_ZONE, alpha=0.06, zorder=0)
+        ax.axvspan(-0.5, n_classical - 0.5, color=COLOR_CLASSICAL, alpha=0.14, zorder=0)
+        ax.text(
+            (n_classical - 1) / 2, 1.02, "CLASSICAL ML", transform=ax.get_xaxis_transform(),
+            ha="center", va="bottom", fontsize=HEADER_FONTSIZE, fontweight="bold", color=COLOR_CLASSICAL,
+        )
     if n_total > n_classical:
-        ax.axvspan(n_classical - 0.5, n_total - 0.5, color=COLOR_QUANTUM_ZONE, alpha=0.06, zorder=0)
+        ax.axvspan(n_classical - 0.5, n_total - 0.5, color=COLOR_QUANTUM, alpha=0.14, zorder=0)
+        ax.text(
+            n_classical + (n_total - n_classical - 1) / 2, 1.02, "QUANTUM ML", transform=ax.get_xaxis_transform(),
+            ha="center", va="bottom", fontsize=HEADER_FONTSIZE, fontweight="bold", color=COLOR_QUANTUM,
+        )
+    if 0 < n_classical < n_total:
+        ax.axvline(n_classical - 0.5, color="black", linewidth=2.4, zorder=5)
+
+
+def _color_xtick_labels(ax: plt.Axes, models: list[str], classical_models: set[str]) -> None:
+    """Color each x-tick label to match its model's paradigm (blue for
+    classical, orange for quantum) -- a second, independent way to tell
+    the groups apart that survives even if the figure is printed in a
+    context where the background shading is hard to see.
+    """
+    for label, name in zip(ax.get_xticklabels(), models):
+        label.set_color(COLOR_CLASSICAL if name in classical_models else COLOR_QUANTUM)
+        label.set_fontweight("bold")
+
+
+def _delta_callout(ax: plt.Axes, best_classical: float, best_quantum: float, metric_name: str, fmt: str = "{:+.3f}") -> None:
+    """A single boxed, signed-number annotation stating the gap between
+    the best classical and best quantum result for one metric, so the
+    comparison this whole figure is making does not depend on visually
+    comparing bar heights -- it is also just stated as one unambiguous
+    number, "quantum leads/trails by X".
+    """
+    delta = best_quantum - best_classical
+    verdict = "QUANTUM LEADS" if delta > 0 else ("CLASSICAL LEADS" if delta < 0 else "TIE")
+    color = COLOR_QUANTUM if delta > 0 else (COLOR_CLASSICAL if delta < 0 else "grey")
+    text = f"Δ best {metric_name} = {fmt.format(delta)}  →  {verdict}"
+    ax.text(
+        0.5, -0.22, text, transform=ax.transAxes, ha="center", va="top",
+        fontsize=LABEL_FONTSIZE, fontweight="bold", color="white",
+        bbox=dict(facecolor=color, alpha=0.92, edgecolor="none", boxstyle="round,pad=0.4"),
+    )
 
 
 def plot_classification_comparison(
@@ -185,12 +219,15 @@ def plot_classification_comparison(
     classification model, classical and quantum, each group internally
     sorted by F1 descending.
 
-    What to look for: bars crossing the "Classical baseline" dashed line
-    are quantum models beating the best classical F1. More importantly,
-    watch for a model whose recall_1 bar sits well below its F1 bar --
-    that model is inconsistently catching true Responders despite a
-    decent overall F1, which in this pharma context is the costliest kind
-    of error (a missed formulation opportunity), not a cosmetic one.
+    What to look for: the blue "CLASSICAL ML" zone vs. the orange
+    "QUANTUM ML" zone, separated by a thick divider -- and the boxed Δ
+    callout under the x-axis states the winner in one number. Within
+    that, bars crossing the "Classical baseline" dashed line are quantum
+    models beating the best classical F1. Watch for a model whose
+    recall_1 bar sits well below its F1 bar -- that model is
+    inconsistently catching true Responders despite a decent overall F1,
+    which in this pharma context is the costliest kind of error (a missed
+    formulation opportunity), not a cosmetic one.
     """
     def f1_of(name: str) -> float:
         return results[name]["metrics"]["f1"]
@@ -208,29 +245,27 @@ def plot_classification_comparison(
 
     x = np.arange(len(models))
     width = 0.26
-    fig, ax = plt.subplots(figsize=(max(10.0, len(models) * 1.3), 6.0))
+    fig, ax = plt.subplots(figsize=(max(11.0, len(models) * 1.4), 6.6))
 
-    _shade_group_zones(ax, len(classical_sorted), len(models))
+    _mark_paradigm_zones(ax, len(classical_sorted), len(models))
 
-    ax.bar(x - width, f1, width, label="F1 score (primary)", color="#1B3B6F", zorder=3)
-    ax.bar(x, recall1, width, label="Recall — Responder (recall_1)", color="#E67E22", zorder=3)
-    ax.bar(x + width, acc, width, label="Accuracy (reference only)", color="#BDBDBD", zorder=3)
+    ax.bar(x - width, f1, width, label="F1 score (primary)", color="#1B3B6F", zorder=3, edgecolor="black", linewidth=0.4)
+    ax.bar(x, recall1, width, label="Recall — Responder (recall_1)", color="#E67E22", zorder=3, edgecolor="black", linewidth=0.4)
+    ax.bar(x + width, acc, width, label="Accuracy (reference only)", color="#BDBDBD", zorder=3, edgecolor="black", linewidth=0.4)
 
     if classical_sorted:
         best_classical_f1 = f1_of(classical_sorted[0])
         ax.axhline(best_classical_f1, color=COLOR_PATZMANN, linestyle="--", linewidth=1.3, zorder=4)
-        # Anchored at the left edge (not right) so it never collides with
-        # the "upper right" legend; a white backing box keeps it legible
-        # even when it lands close to a bar-top value annotation.
         ax.text(
             -0.4, best_classical_f1 + 0.015, f"Classical baseline (F1={best_classical_f1:.3f})",
             ha="left", va="bottom", fontsize=TICK_FONTSIZE, style="italic", zorder=5,
             bbox=dict(facecolor="white", alpha=0.85, edgecolor="none", pad=1.5),
         )
 
-    # Annotate the top-3 quantum models (by F1) directly on their bars.
-    top3_quantum = sorted(quantum_sorted, key=f1_of, reverse=True)[:3]
-    for name in top3_quantum:
+    # Annotate every quantum model's F1 directly on its bar -- with only 4
+    # quantum models in this suite, "top-3" would hide barely anything, so
+    # every one gets its value labeled to remove all ambiguity.
+    for name in quantum_sorted:
         idx = models.index(name)
         val = f1_of(name)
         ax.text(
@@ -240,11 +275,16 @@ def plot_classification_comparison(
 
     ax.set_xticks(x)
     ax.set_xticklabels(models, rotation=25, ha="right", fontsize=TICK_FONTSIZE)
-    ax.set_ylim(0, 1.1)
+    _color_xtick_labels(ax, models, set(classical_sorted))
+    ax.set_ylim(0, 1.15)
     ax.set_ylabel("Score", fontsize=LABEL_FONTSIZE)
-    ax.set_title("LOOCV Classification Results — Classical vs Quantum (N=29)", fontsize=TITLE_FONTSIZE, fontweight="bold")
+    ax.set_title("LOOCV Classification Results — Classical vs Quantum (N=29)", fontsize=TITLE_FONTSIZE, fontweight="bold", pad=28)
+    ax.tick_params(labelsize=TICK_FONTSIZE)
     ax.legend(fontsize=TICK_FONTSIZE, loc="upper right", framealpha=0.9)
-    _style_axis(ax)
+
+    if classical_sorted and quantum_sorted:
+        _delta_callout(ax, f1_of(classical_sorted[0]), f1_of(quantum_sorted[0]), "F1")
+
     fig.tight_layout()
     _save_fig(fig, output_dir, "classification_comparison")
 
@@ -267,12 +307,14 @@ def plot_roc_comparison(
     curve under leave-one-out cross-validation, since no single fold has
     enough held-out points for its own curve.
 
-    Color identifies the model (fixed 8-slot categorical order, classical
-    models first); line style identifies the family (solid = classical,
-    dashed = quantum) as a second, color-independent encoding, so the two
-    groups are still distinguishable in grayscale or under color
-    blindness. The legend is sorted by AUC descending and doubles as the
-    direct-label layer this many overlapping lines need.
+    Line color identifies the individual model (ROC_LINE_COLORS, fixed
+    order, classical models first); line style carries the classical/
+    quantum split as its own, color-independent channel (solid =
+    classical, dashed = quantum) -- the same "redundant channels"
+    principle every other figure in this module uses, applied to a figure
+    that needs more than two colors on screen at once. The legend is
+    sorted by AUC descending and doubles as the direct-label layer this
+    many overlapping lines need.
     """
     classical_present = [m for m in classical_models if m in results]
     quantum_present = [m for m in quantum_models if m in results]
@@ -302,7 +344,7 @@ def plot_roc_comparison(
     lines_by_model = {}
     for i, name in enumerate(models):
         c = curves[name]
-        color = PALETTE_CATEGORICAL[i % len(PALETTE_CATEGORICAL)]
+        color = ROC_LINE_COLORS[i % len(ROC_LINE_COLORS)]
         (line,) = ax.plot(
             c["fpr"], c["tpr"], color=color, linestyle="-" if c["family"] == "classical" else "--",
             linewidth=2.6 if name == best_model else 1.6, zorder=3,
@@ -325,9 +367,8 @@ def plot_roc_comparison(
     ax.set_ylim(-0.02, 1.02)
     ax.set_xlabel("False Positive Rate", fontsize=LABEL_FONTSIZE)
     ax.set_ylabel("True Positive Rate", fontsize=LABEL_FONTSIZE)
-    ax.set_title("ROC — Classical vs Quantum Classifiers (LOOCV, N=29)", fontsize=TITLE_FONTSIZE, fontweight="bold")
+    ax.set_title("ROC — Classical vs Quantum Classifiers (LOOCV, N=29)", fontsize=TITLE_FONTSIZE, fontweight="bold", pad=16)
     ax.set_aspect("equal")
-    _style_axis(ax)
     fig.tight_layout()
     _save_fig(fig, output_dir, "roc_comparison")
 
@@ -345,15 +386,22 @@ def plot_regression_comparison(
     quantum_models: list[str],
     output_dir: Path,
 ) -> None:
-    """Grouped bar chart: Q^2 (LOOCV, primary, left axis, green) and RMSE
-    (secondary, right axis, red, COMDR15 units) for every regression
-    model, sorted by Q^2 descending.
+    """Two panels: Q^2 (LOOCV, primary, left) and RMSE (COMDR15 units,
+    right) for every regression model, sorted by Q^2 descending.
 
-    What to look for: the Patzmann Q^2=0.77 dashed line is the single
-    number every bar is implicitly judged against -- a bar crossing it
-    matches or beats the published classical chemometric benchmark on this
-    exact dataset. The Q^2=0 line matters just as much: a bar sitting at
-    or below it means that model does no better (or worse) than always
+    Q^2 and RMSE are different units on different scales -- a dual-axis
+    (twinx) bar chart would let their arbitrary relative scaling invent a
+    visual "RMSE goes up as Q^2 goes down" correlation that is not
+    actually in the data. Two panels sharing the same model order and
+    x-axis instead: each bar height is only ever compared against other
+    bars on its own, honest scale.
+
+    What to look for: the blue "CLASSICAL ML" zone vs. the orange
+    "QUANTUM ML" zone in both panels, separated by a thick divider -- and
+    the boxed Δ callout under the Q² panel states the winner in one
+    number. The Pätzmann Q^2=0.77 dashed line is the single number every
+    Q² bar is implicitly judged against; the Q^2=0 line matters just as
+    much -- a bar at or below it does no better (or worse) than always
     predicting the training-fold mean, no matter how small its RMSE looks
     in isolation (RMSE alone doesn't reveal whether a model is actually
     modeling the data or just regressing to its mean).
@@ -372,16 +420,10 @@ def plot_regression_comparison(
     rmse = [results[m]["metrics"]["rmse"] for m in models]
     x = np.arange(len(models))
 
-    # Q^2 and RMSE are different units on different scales -- a dual-axis
-    # (twinx) bar chart would let their arbitrary relative scaling invent a
-    # visual "RMSE goes up as Q^2 goes down" correlation that isn't
-    # actually in the data. Two panels sharing the same model order and
-    # x-axis instead: each bar height is only ever compared against other
-    # bars on its own, honest scale.
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(max(11.0, len(models) * 2.2), 5.6))
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(max(12.0, len(models) * 2.4), 6.6))
 
-    _shade_group_zones(ax1, len(classical_sorted), len(models))
-    ax1.bar(x, q2, width=0.6, color=PALETTE_CATEGORICAL[3], zorder=3)  # green: "higher is better"
+    _mark_paradigm_zones(ax1, len(classical_sorted), len(models))
+    ax1.bar(x, q2, width=0.6, color="#1B5E20", zorder=3, edgecolor="black", linewidth=0.4)
     for xi, val in zip(x, q2):
         # A bar landing within 0.05 of the Pätzmann line (PLS does, by
         # construction) gets its value label pushed further up so it
@@ -393,38 +435,47 @@ def plot_regression_comparison(
             xi, val + offset, f"{val:.3f}",
             ha="center", va="bottom" if val >= 0 else "top", fontsize=TICK_FONTSIZE, fontweight="bold",
         )
+    # Both reference labels anchored at the left edge (not right), so
+    # neither collides with the legend. Given a white backing box, since a
+    # model landing close to the Patzmann Q^2 (as PLS itself does, by
+    # construction) would otherwise have its own bar-top value annotation
+    # sitting right where this label would go.
     ax1.axhline(PATZMANN_Q2_BENCHMARK, color=COLOR_PATZMANN, linestyle="--", linewidth=1.3, zorder=4)
     ax1.text(
         -0.45, PATZMANN_Q2_BENCHMARK + 0.05, f"Pätzmann benchmark (PLS, Q²={PATZMANN_Q2_BENCHMARK:.2f})",
         ha="left", va="bottom", fontsize=TICK_FONTSIZE - 1, style="italic", zorder=5,
         bbox=dict(facecolor="white", alpha=0.85, edgecolor="none", pad=1.5),
     )
-    ax1.axhline(0.0, color=COLOR_MUTED, linestyle=":", linewidth=1.1, zorder=4)
+    ax1.axhline(0.0, color="grey", linestyle=":", linewidth=1.1, zorder=4)
     ax1.text(
         -0.45, 0.02, "Baseline (predict mean)",
-        ha="left", va="bottom", fontsize=TICK_FONTSIZE - 2, color=COLOR_MUTED, style="italic", zorder=5,
+        ha="left", va="bottom", fontsize=TICK_FONTSIZE - 2, color="grey", style="italic", zorder=5,
         bbox=dict(facecolor="white", alpha=0.85, edgecolor="none", pad=1.5),
     )
-    ax1.set_ylabel("Q² (LOOCV) — higher is better", fontsize=LABEL_FONTSIZE)
-    ax1.set_ylim(min(-0.5, min(q2) - 0.15), 1.0)
+    ax1.set_ylabel("Q² (LOOCV) — higher is better", fontsize=LABEL_FONTSIZE, color="#1B5E20")
+    ax1.set_ylim(min(-0.5, min(q2) - 0.15), 1.05)
+    ax1.tick_params(axis="y", labelcolor="#1B5E20", labelsize=TICK_FONTSIZE)
     ax1.set_xticks(x)
     ax1.set_xticklabels(models, rotation=20, ha="right", fontsize=TICK_FONTSIZE)
-    ax1.set_title("Q² vs Pätzmann benchmark", fontsize=TITLE_FONTSIZE - 1, fontweight="bold")
-    _style_axis(ax1)
+    _color_xtick_labels(ax1, models, set(classical_sorted))
+    ax1.set_title("Q² vs Pätzmann benchmark", fontsize=TITLE_FONTSIZE - 1, fontweight="bold", pad=26)
+    if classical_sorted and quantum_sorted:
+        _delta_callout(ax1, q2_of(classical_sorted[0]), q2_of(quantum_sorted[0]), "Q²")
 
-    _shade_group_zones(ax2, len(classical_sorted), len(models))
-    ax2.bar(x, rmse, width=0.6, color=PALETTE_CATEGORICAL[5], zorder=3)  # red: "lower is better"
+    _mark_paradigm_zones(ax2, len(classical_sorted), len(models))
+    ax2.bar(x, rmse, width=0.6, color="#C0392B", alpha=0.85, zorder=3, edgecolor="black", linewidth=0.4)
     for xi, val in zip(x, rmse):
         ax2.text(xi, val + max(rmse) * 0.015, f"{val:.2f}", ha="center", va="bottom", fontsize=TICK_FONTSIZE, fontweight="bold")
-    ax2.set_ylabel("RMSE (COMDR15 units) — lower is better", fontsize=LABEL_FONTSIZE)
+    ax2.set_ylabel("RMSE (COMDR15 units) — lower is better", fontsize=LABEL_FONTSIZE, color="#C0392B")
     ax2.set_ylim(0, max(rmse) * 1.15)
+    ax2.tick_params(axis="y", labelcolor="#C0392B", labelsize=TICK_FONTSIZE)
     ax2.set_xticks(x)
     ax2.set_xticklabels(models, rotation=20, ha="right", fontsize=TICK_FONTSIZE)
-    ax2.set_title("RMSE (physical COMDR15 units)", fontsize=TITLE_FONTSIZE - 1, fontweight="bold")
-    _style_axis(ax2)
+    _color_xtick_labels(ax2, models, set(classical_sorted))
+    ax2.set_title("RMSE (physical COMDR15 units)", fontsize=TITLE_FONTSIZE - 1, fontweight="bold", pad=26)
 
     fig.suptitle("LOOCV Regression Results — Classical vs Quantum (N=29)", fontsize=TITLE_FONTSIZE, fontweight="bold")
-    fig.tight_layout(rect=[0, 0, 1, 0.94])
+    fig.tight_layout(rect=[0, 0, 1, 0.93])
     _save_fig(fig, output_dir, "regression_comparison")
 
 
@@ -439,35 +490,37 @@ def plot_per_drug_regression_scatter(
     LOOCV-held-out drug) for the Patzmann PLS baseline and the best
     quantum regressor.
 
-    What to look for: points on the black y=x diagonal are perfect LOOCV
-    predictions; distance from it is per-drug error. Point color follows
-    the *classification* threshold (COMDR15=2.0) even in this regression
-    view: green means the model landed on the correct side of the
-    Responder/Non-Responder boundary regardless of its exact numeric
-    error, red means it crossed to the wrong side -- a quick way to see
-    whether a regression model's mistakes are at least directionally
-    safe. Labeled points are drugs with |predicted - true| > 1.5,
+    What to look for: each panel has a colored border and header matching
+    its paradigm (blue classical, orange quantum) and its own Q²/RMSE in
+    the title, plus a boxed Δ callout across the top stating the Q² gap
+    between them as one signed number. Within each panel, points on the
+    black y=x diagonal are perfect LOOCV predictions; distance from it is
+    per-drug error. Point color follows the *classification* threshold
+    (COMDR15=2.0) even in this regression view: green means the model
+    landed on the correct side of the Responder/Non-Responder boundary
+    regardless of its exact numeric error, red means it crossed to the
+    wrong side. Labeled points are drugs with |predicted - true| > 1.5,
     worth cross-referencing against physicochemical outliers.
     """
-    candidates = [(classical_model, "Classical (PLS)"), (best_quantum_model, "Best Quantum")]
-    models_to_plot = [(m, label) for m, label in candidates if m in results]
+    candidates = [(classical_model, "CLASSICAL", COLOR_CLASSICAL), (best_quantum_model, "QUANTUM", COLOR_QUANTUM)]
+    models_to_plot = [(m, label, color) for m, label, color in candidates if m in results]
     if not models_to_plot:
         print("[plot_per_drug_regression_scatter] no models found in results, skipping")
         return
 
-    fig, axes = plt.subplots(1, len(models_to_plot), figsize=(7.2 * len(models_to_plot), 6.5), squeeze=False)
+    fig, axes = plt.subplots(1, len(models_to_plot), figsize=(7.4 * len(models_to_plot), 7.0), squeeze=False)
     axes = axes[0]
 
-    for ax, (model_name, label) in zip(axes, models_to_plot):
+    for ax, (model_name, label, color) in zip(axes, models_to_plot):
         res = results[model_name]
         y_true = np.asarray(res["targets"], dtype=float)
         y_pred = np.asarray(res["predictions"], dtype=float)
         m = res["metrics"]
 
         correct_side = (y_true > CLASSIFICATION_THRESHOLD) == (y_pred > CLASSIFICATION_THRESHOLD)
-        colors = np.where(correct_side, "#0ca30c", "#d03b3b")  # status palette: good / critical
+        colors = np.where(correct_side, "#2E7D32", "#C0392B")
 
-        ax.scatter(y_true, y_pred, c=colors, s=60, edgecolor="k", linewidth=0.5, zorder=3)
+        ax.scatter(y_true, y_pred, c=colors, s=65, edgecolor="k", linewidth=0.6, zorder=3)
 
         axis_max = float(max(y_true.max(), y_pred.max())) * 1.08
         lims = [0.0, axis_max]
@@ -487,15 +540,36 @@ def plot_per_drug_regression_scatter(
         ax.set_ylim(lims)
         ax.set_xlabel("True COMDR15", fontsize=LABEL_FONTSIZE)
         ax.set_ylabel("Predicted COMDR15", fontsize=LABEL_FONTSIZE)
-        ax.set_title(f"{label} ({model_name})\nQ²={m['q2']:.3f}, RMSE={m['rmse']:.3f}", fontsize=TITLE_FONTSIZE - 1)
-        ax.legend(fontsize=TICK_FONTSIZE - 1, loc="upper left")
-        _style_axis(ax, y_grid=False)
+        # Colored header banner names the paradigm unambiguously above each panel.
+        ax.text(
+            0.5, 1.14, label, transform=ax.transAxes, ha="center", va="bottom",
+            fontsize=HEADER_FONTSIZE + 1, fontweight="bold", color="white",
+            bbox=dict(facecolor=color, alpha=0.95, edgecolor="none", boxstyle="round,pad=0.35"),
+        )
+        ax.set_title(f"{model_name}\nQ²={m['q2']:.3f}, RMSE={m['rmse']:.3f}", fontsize=TITLE_FONTSIZE - 1, pad=14)
+        for spine in ax.spines.values():
+            spine.set_edgecolor(color)
+            spine.set_linewidth(2.2)
+        ax.tick_params(labelsize=TICK_FONTSIZE)
+        ax.legend(fontsize=TICK_FONTSIZE - 1, loc="lower right")
+
+    if len(models_to_plot) == 2:
+        q2_a = results[models_to_plot[0][0]]["metrics"]["q2"]
+        q2_b = results[models_to_plot[1][0]]["metrics"]["q2"]
+        delta = q2_b - q2_a  # quantum - classical, by construction of `candidates` order
+        verdict = "QUANTUM LEADS" if delta > 0 else ("CLASSICAL LEADS" if delta < 0 else "TIE")
+        color = COLOR_QUANTUM if delta > 0 else (COLOR_CLASSICAL if delta < 0 else "grey")
+        fig.text(
+            0.5, 0.965, f"Δ Q² (quantum − classical) = {delta:+.3f}  →  {verdict}",
+            ha="center", va="top", fontsize=LABEL_FONTSIZE, fontweight="bold", color="white",
+            bbox=dict(facecolor=color, alpha=0.92, edgecolor="none", boxstyle="round,pad=0.4"),
+        )
 
     fig.suptitle(
         "Per-Drug LOOCV Predictions — Best Quantum Regressor vs PLS Baseline",
-        fontsize=TITLE_FONTSIZE, fontweight="bold",
+        fontsize=TITLE_FONTSIZE, fontweight="bold", y=1.06,
     )
-    fig.tight_layout(rect=[0, 0, 1, 0.93])
+    fig.tight_layout(rect=[0, 0, 1, 0.9])
     _save_fig(fig, output_dir, "per_drug_regression_scatter")
 
 
@@ -504,19 +578,25 @@ def plot_per_drug_classification_heatmap(
     drug_names: list[str],
     true_comdr15: np.ndarray,
     output_dir: Path,
+    classical_models: list[str] | None = None,
 ) -> None:
     """(n_models x 29 drugs) heatmap: green if that model's LOOCV
     prediction for that drug was correct, red if wrong. Rows sorted by F1
     (best model at top), columns sorted by true COMDR15 ascending, with a
     vertical divider at the Responder/Non-Responder boundary.
 
-    What to look for: a column that is mostly red straight down, across
-    every row regardless of model family or paradigm, identifies a
-    genuinely hard drug -- most likely one sitting close to the
-    COMDR15=2.0 threshold or an outlier in feature space -- rather than a
-    weakness specific to any one model. That is the direct visual answer
-    to "which drugs are hardest to predict across all models" (Task 5).
+    What to look for: each model's row label is colored and bolded by
+    paradigm (blue classical, orange quantum), so paradigm reads out
+    unambiguously even though rows are sorted by rank (best model first)
+    rather than grouped -- ranking determines position, color alone
+    determines paradigm. A column that is mostly red straight down, across
+    every row regardless of family, identifies a genuinely hard drug --
+    most likely one sitting close to the COMDR15=2.0 threshold or an
+    outlier in feature space -- rather than a weakness specific to any one
+    model. That is the direct visual answer to "which drugs are hardest to
+    predict across all models" (Task 5).
     """
+    classical_set = set(classical_models or CLASSIFICATION_CLASSICAL_MODELS)
     models = sorted(results.keys(), key=lambda m: -results[m]["metrics"]["f1"])
     if not models:
         print("[plot_per_drug_classification_heatmap] no models found in results, skipping")
@@ -533,32 +613,129 @@ def plot_per_drug_classification_heatmap(
         correct = (y_true == y_pred).astype(int)
         correctness[row] = correct[order]
 
-    fig, ax = plt.subplots(figsize=(max(12.0, len(order) * 0.5), max(4.0, len(models) * 0.6)))
-    cmap = ListedColormap(["#d03b3b", "#0ca30c"])  # status palette: 0 -> wrong (critical), 1 -> correct (good)
+    fig, ax = plt.subplots(figsize=(max(14.0, len(order) * 0.55), max(5.5, len(models) * 0.7)))
+    cmap = ListedColormap(["#C0392B", "#2E7D32"])  # 0 -> wrong (red), 1 -> correct (green)
     sns.heatmap(
         correctness, cmap=cmap, cbar=False, linewidths=0.6, linecolor="white",
         xticklabels=[f"{d}\n{c:.2f}" for d, c in zip(sorted_drugs, sorted_comdr)],
         yticklabels=models, ax=ax, vmin=0, vmax=1,
     )
 
+    # Responder/Non-Responder header, in AXES fraction (not data) coordinates
+    # so it sits reliably just above the heatmap regardless of row count,
+    # instead of colliding with the title.
     responder_boundary = int(np.searchsorted(sorted_comdr, CLASSIFICATION_THRESHOLD))
-    ax.axvline(responder_boundary, color="black", linewidth=2.2)
+    ax.axvline(responder_boundary, color="black", linewidth=2.4)
+    header_y = 1.03
     if responder_boundary > 0:
-        ax.text(responder_boundary / 2, -0.6, "Non-Responder", ha="center", fontsize=TICK_FONTSIZE, fontweight="bold")
+        ax.text(
+            responder_boundary / 2, header_y, "Non-Responder", transform=ax.get_xaxis_transform(),
+            ha="center", va="bottom", fontsize=TICK_FONTSIZE, fontweight="bold",
+        )
     if responder_boundary < len(order):
         ax.text(
-            responder_boundary + (len(order) - responder_boundary) / 2, -0.6, "Responder",
-            ha="center", fontsize=TICK_FONTSIZE, fontweight="bold",
+            responder_boundary + (len(order) - responder_boundary) / 2, header_y, "Responder",
+            transform=ax.get_xaxis_transform(), ha="center", va="bottom", fontsize=TICK_FONTSIZE, fontweight="bold",
         )
 
     ax.set_xticklabels(ax.get_xticklabels(), rotation=90, ha="center", fontsize=TICK_FONTSIZE - 2)
-    ax.set_yticklabels(ax.get_yticklabels(), rotation=0, fontsize=TICK_FONTSIZE)
+    ax.set_yticklabels(ax.get_yticklabels(), rotation=0, fontsize=TICK_FONTSIZE, fontweight="bold")
+    for label, name in zip(ax.get_yticklabels(), models):
+        label.set_color(COLOR_CLASSICAL if name in classical_set else COLOR_QUANTUM)
+
+    # Legend placed to the RIGHT of the heatmap, vertically centered --
+    # the x-tick zone below the heatmap is already tall (two-line, 90-
+    # degree-rotated drug labels), so anything anchored below it would
+    # need an awkwardly large negative offset to clear it reliably.
+    legend_handles = [
+        Patch(facecolor=COLOR_CLASSICAL, label="Classical ML"),
+        Patch(facecolor=COLOR_QUANTUM, label="Quantum ML"),
+        Patch(facecolor="#2E7D32", label="Correct prediction"),
+        Patch(facecolor="#C0392B", label="Wrong prediction"),
+    ]
+    ax.legend(
+        handles=legend_handles, loc="center left", bbox_to_anchor=(1.01, 0.5),
+        fontsize=TICK_FONTSIZE, frameon=False,
+    )
+
     ax.set_title(
         "Per-Drug Prediction Correctness Across All Classification Models",
-        fontsize=TITLE_FONTSIZE, fontweight="bold",
+        fontsize=TITLE_FONTSIZE, fontweight="bold", pad=34,
     )
     fig.tight_layout()
     _save_fig(fig, output_dir, "per_drug_classification_heatmap")
+
+
+def plot_confusion_matrices(
+    results: dict[str, dict],
+    model_names: list[str],
+    output_dir: Path,
+    suite_label: str,
+    color: str,
+    filename: str,
+) -> None:
+    """One figure holding a 2x2 confusion matrix per model in
+    `model_names`, laid out side by side in a single row. Rows = true
+    label, columns = predicted label (Non-Responder=0, Responder=1), the
+    standard sklearn convention. Every subplot is colored in a single-hue
+    colormap derived from `color`, and bordered in that same color, so
+    the whole figure (and each subplot within it) is unmistakably tagged
+    to one paradigm even cropped out of context -- this is meant to be
+    called once for the classical models and once for the quantum models,
+    producing two separate, self-labeled images.
+
+    What to look for: the diagonal (top-left TN, bottom-right TP) holds
+    correct predictions -- a model that "works" has essentially all its
+    mass on the diagonal. Off-diagonal mass is where it matters *which*
+    cell: top-right (FP) is a false alarm (predicted Responder, actually
+    isn't), bottom-left (FN) is a missed Responder -- the costliest error
+    in this pharma context, a genuine formulation opportunity the model
+    told you to skip.
+    """
+    present = [m for m in model_names if m in results]
+    if not present:
+        print(f"[plot_confusion_matrices] no models found for '{suite_label}', skipping")
+        return
+
+    ncols = min(len(present), 4)
+    nrows = -(-len(present) // ncols)  # ceiling division
+    fig, axes = plt.subplots(nrows, ncols, figsize=(4.8 * ncols, 5.0 * nrows), squeeze=False)
+    axes_flat = axes.flatten()
+    cmap = sns.light_palette(color, as_cmap=True)
+
+    for ax, name in zip(axes_flat, present):
+        res = results[name]
+        y_true = np.asarray(res["targets"], dtype=int)
+        y_pred = np.asarray(res["predictions"], dtype=int)
+        cm = confusion_matrix(y_true, y_pred, labels=[0, 1])
+        m = res["metrics"]
+
+        sns.heatmap(
+            cm, annot=True, fmt="d", cmap=cmap, cbar=False, ax=ax, square=True,
+            annot_kws={"fontsize": 18, "fontweight": "bold"}, linewidths=1.5, linecolor="white",
+            xticklabels=["Non-Resp.", "Responder"], yticklabels=["Non-Resp.", "Responder"],
+        )
+        ax.set_xlabel("Predicted", fontsize=LABEL_FONTSIZE)
+        ax.set_ylabel("True", fontsize=LABEL_FONTSIZE)
+        ax.set_title(
+            f"{name}\nAcc={m['accuracy']:.3f}  F1={m['f1']:.3f}",
+            fontsize=TITLE_FONTSIZE - 2, fontweight="bold", color=color,
+        )
+        ax.tick_params(labelsize=TICK_FONTSIZE - 1, rotation=0)
+        for spine in ax.spines.values():
+            spine.set_visible(True)
+            spine.set_edgecolor(color)
+            spine.set_linewidth(2.2)
+
+    for ax in axes_flat[len(present):]:
+        ax.axis("off")
+
+    fig.suptitle(
+        f"Confusion Matrices — {suite_label} (LOOCV, N=29)",
+        fontsize=TITLE_FONTSIZE + 2, fontweight="bold", color=color, y=1.04,
+    )
+    fig.tight_layout()
+    _save_fig(fig, output_dir, filename)
 
 
 def plot_kta_comparison(results_dir: Path, output_dir: Path) -> None:
@@ -609,14 +786,14 @@ def plot_kta_comparison(results_dir: Path, output_dir: Path) -> None:
     table = pd.DataFrame(rows)
     color_by_kind = {
         "fixed": COLOR_MUTED,
-        "trained_before": PALETTE_CATEGORICAL[7] + "80",  # orange, translucent: not yet optimized
-        "trained_after": PALETTE_CATEGORICAL[7],           # orange, solid: the optimized result
+        "trained_before": COLOR_QUANTUM + "80",  # translucent: not yet optimized
+        "trained_after": COLOR_QUANTUM,          # solid: the optimized result
     }
     colors = [color_by_kind[k] for k in table["kind"]]
 
     fig, ax = plt.subplots(figsize=(8.5, 1.1 + 0.7 * len(table)))
     y = np.arange(len(table))
-    ax.barh(y, table["kta"], color=colors, height=0.6, zorder=3)
+    ax.barh(y, table["kta"], color=colors, height=0.6, zorder=3, edgecolor="black", linewidth=0.4)
     for yi, val in zip(y, table["kta"]):
         ax.text(val + 0.012, yi, f"{val:.3f}", va="center", fontsize=TICK_FONTSIZE, fontweight="bold")
 
@@ -644,10 +821,7 @@ def plot_kta_comparison(results_dir: Path, output_dir: Path) -> None:
     ax.invert_yaxis()  # first row (first fixed encoding) at the top
     ax.set_xlim(0, max(0.05, float(table["kta"].max())) * 1.35)
     ax.set_xlabel("Kernel Target Alignment (higher = kernel geometry matches labels better)", fontsize=LABEL_FONTSIZE)
-    ax.set_title("Kernel Target Alignment — Fixed Encodings vs. Our Trained Kernel", fontsize=TITLE_FONTSIZE, fontweight="bold")
-    _style_axis(ax, y_grid=False)
-    ax.xaxis.grid(True, color=COLOR_GRID, linewidth=0.9, zorder=0)
-    ax.set_axisbelow(True)
+    ax.set_title("Kernel Target Alignment — Fixed Encodings vs. Our Trained Kernel", fontsize=TITLE_FONTSIZE, fontweight="bold", pad=16)
     fig.tight_layout()
     _save_fig(fig, output_dir, "kta_comparison")
 
@@ -687,6 +861,12 @@ def main(argv: list[str] | None = None) -> None:
     plot_classification_comparison(clf_results, CLASSIFICATION_CLASSICAL_MODELS, CLASSIFICATION_QUANTUM_MODELS, output_dir)
     plot_roc_comparison(clf_results, CLASSIFICATION_CLASSICAL_MODELS, CLASSIFICATION_QUANTUM_MODELS, output_dir)
     plot_regression_comparison(reg_results, REGRESSION_CLASSICAL_MODELS, REGRESSION_QUANTUM_MODELS, output_dir)
+    plot_confusion_matrices(
+        clf_results, CLASSIFICATION_CLASSICAL_MODELS, output_dir, "Classical ML", COLOR_CLASSICAL, "confusion_matrices_classical"
+    )
+    plot_confusion_matrices(
+        clf_results, CLASSIFICATION_QUANTUM_MODELS, output_dir, "Quantum ML", COLOR_QUANTUM, "confusion_matrices_quantum"
+    )
 
     drug_names, true_comdr15 = None, None
     try:
@@ -706,7 +886,9 @@ def main(argv: list[str] | None = None) -> None:
         print("[main] missing a classical or quantum regressor result, skipping Plot 3.")
 
     if true_comdr15 is not None:
-        plot_per_drug_classification_heatmap(clf_results, drug_names, true_comdr15, output_dir)
+        plot_per_drug_classification_heatmap(
+            clf_results, drug_names, true_comdr15, output_dir, classical_models=CLASSIFICATION_CLASSICAL_MODELS
+        )
 
     plot_kta_comparison(Path(args.results_dir), output_dir)
 

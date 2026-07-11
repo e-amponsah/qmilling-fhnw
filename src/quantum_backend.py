@@ -22,6 +22,7 @@ does not otherwise need to know where its circuits are actually running.
 
 import logging
 import os
+import time
 from dataclasses import dataclass
 
 import numpy as np
@@ -34,6 +35,11 @@ from qiskit_ibm_runtime import QiskitRuntimeService, SamplerV2
 from src.config import RANDOM_SEED
 
 logger = logging.getLogger(__name__)
+
+# Real IBM jobs sit in JOB_FINAL_STATES once they stop changing; everything
+# before that (INITIALIZING, QUEUED, RUNNING) is still in flight. Local Aer
+# jobs never leave DONE since they run synchronously inside .run().
+_IBM_JOB_FINAL_STATES = ("DONE", "CANCELLED", "ERROR")
 
 
 def build_device_like_noise_model(
@@ -63,6 +69,10 @@ class ExecutionConfig:
     seed: int = RANDOM_SEED
     ibm_backend_name: str | None = None  # if not set, picks the least busy backend
     noise_model: NoiseModel | None = None  # override for aer_noisy, otherwise built automatically
+    # Below apply to mode="ibm_runtime" only -- a job on real hardware can
+    # sit queued for minutes to hours, so waiting for it needs its own knobs.
+    job_poll_seconds: float = 15.0  # how often to log queue/running status while waiting
+    job_timeout: float | None = None  # give up after this many seconds; None = wait indefinitely
 
     def label(self) -> str:
         if self.mode == "ibm_runtime":
@@ -72,13 +82,15 @@ class ExecutionConfig:
 
 def default_execution_config() -> ExecutionConfig:
     """Build an ExecutionConfig from environment variables (QC_BACKEND_MODE,
-    QC_SHOTS, QC_IBM_BACKEND), so the execution target can be changed from
-    .env or the shell without touching any code.
+    QC_SHOTS, QC_IBM_BACKEND, QC_JOB_TIMEOUT), so the execution target can be
+    changed from .env or the shell without touching any code.
     """
     mode = os.environ.get("QC_BACKEND_MODE", "aer_simulator")
     shots = int(os.environ.get("QC_SHOTS", "4096"))
     ibm_backend_name = os.environ.get("QC_IBM_BACKEND") or None
-    return ExecutionConfig(mode=mode, shots=shots, ibm_backend_name=ibm_backend_name)
+    job_timeout_raw = os.environ.get("QC_JOB_TIMEOUT", "").strip()
+    job_timeout = float(job_timeout_raw) if job_timeout_raw else None
+    return ExecutionConfig(mode=mode, shots=shots, ibm_backend_name=ibm_backend_name, job_timeout=job_timeout)
 
 
 class QuantumExecutor:
@@ -128,15 +140,107 @@ class QuantumExecutor:
             return []
         transpiled = self._pm.run(circuits)
         job = self.sampler.run(transpiled, shots=self.config.shots)
-        result = job.result()
 
-        counts_list = []
-        for pub_result in result:
-            data_bin = pub_result.data
-            creg_name = next(iter(data_bin.keys())) if hasattr(data_bin, "keys") else "meas"
-            bit_array = getattr(data_bin, creg_name)
-            counts_list.append(bit_array.get_counts())
-        return counts_list
+        if self.config.mode == "ibm_runtime":
+            # job.result() on qiskit-ibm-runtime already blocks until the
+            # job reaches a final state, but it polls silently and any
+            # transient network error while doing so (a dropped wifi packet
+            # during a multi-hour queue wait) propagates straight up and
+            # kills the whole LOOCV run even though the job itself is still
+            # fine on IBM's servers. _wait_for_ibm_job logs the job ID right
+            # away (so it is recoverable with recover_ibm_job_counts even if
+            # this process dies), reports queue/running progress instead of
+            # hanging silently, and retries through transient polling errors
+            # instead of losing an already-submitted job over a blip.
+            result = self._wait_for_ibm_job(job)
+        else:
+            result = job.result()
+        return _decode_sampler_result(result)
+
+    def _wait_for_ibm_job(self, job):
+        job_id = job.job_id()
+        logger.info(
+            "IBM Runtime job submitted | job_id=%s | backend=%s | if this process is interrupted, "
+            "recover its results later with recover_ibm_job_counts('%s')",
+            job_id, self.config.label(), job_id,
+        )
+        poll_seconds = max(1.0, self.config.job_poll_seconds)
+        start = time.monotonic()
+        last_status, consecutive_poll_errors = None, 0
+
+        while True:
+            elapsed = time.monotonic() - start
+            if self.config.job_timeout is not None and elapsed > self.config.job_timeout:
+                raise TimeoutError(
+                    f"IBM Runtime job {job_id} did not finish within {self.config.job_timeout:.0f}s "
+                    f"(last status={last_status}). It keeps running on IBM's side regardless -- "
+                    f"reconnect later with recover_ibm_job_counts('{job_id}')."
+                )
+            try:
+                status = job.status()
+                consecutive_poll_errors = 0
+            except Exception as exc:
+                # A failure to *check* status is not a failure of the job
+                # itself -- the job keeps running server-side either way.
+                # Retry a bounded number of times before giving up, rather
+                # than letting one network blip discard a queued/running job.
+                consecutive_poll_errors += 1
+                if consecutive_poll_errors > 10:
+                    raise RuntimeError(
+                        f"Lost contact with IBM Runtime while polling job {job_id} "
+                        f"({consecutive_poll_errors} consecutive errors, last: {exc}). "
+                        f"The job may still complete on IBM's side -- reconnect later with "
+                        f"recover_ibm_job_counts('{job_id}')."
+                    ) from exc
+                logger.warning(
+                    "Transient error polling IBM Runtime job %s status (attempt %d/10): %s",
+                    job_id, consecutive_poll_errors, exc,
+                )
+                time.sleep(poll_seconds)
+                continue
+
+            if status != last_status:
+                logger.info("IBM Runtime job %s | status=%s | elapsed=%.0fs", job_id, status, elapsed)
+                last_status = status
+            if status in _IBM_JOB_FINAL_STATES:
+                break
+            time.sleep(poll_seconds)
+
+        if status == "ERROR":
+            raise RuntimeError(f"IBM Runtime job {job_id} failed: {job.error_message()}")
+        if status == "CANCELLED":
+            raise RuntimeError(f"IBM Runtime job {job_id} was cancelled.")
+        return job.result()
+
+
+def _decode_sampler_result(result) -> list[dict[str, int]]:
+    """Pull the per-circuit measurement counts dict out of a SamplerV2
+    PrimitiveResult, in the same order the circuits were submitted in.
+    Shared between QuantumExecutor.run_counts_batch and
+    recover_ibm_job_counts, since both end up with the same result object.
+    """
+    counts_list = []
+    for pub_result in result:
+        data_bin = pub_result.data
+        creg_name = next(iter(data_bin.keys())) if hasattr(data_bin, "keys") else "meas"
+        bit_array = getattr(data_bin, creg_name)
+        counts_list.append(bit_array.get_counts())
+    return counts_list
+
+
+def recover_ibm_job_counts(job_id: str) -> list[dict[str, int]]:
+    """Reconnect to a previously submitted IBM Runtime job by ID and decode
+    its measurement counts, in the same format QuantumExecutor.run_counts_batch
+    returns. For use after this process was interrupted (killed, disconnected,
+    crashed) while a real-hardware job was still queued or running -- the job
+    keeps going on IBM's side, so its results are not lost, just not waited on
+    by this process anymore. The job ID is logged by _wait_for_ibm_job as soon
+    as a job is submitted, specifically so it can be recovered this way.
+    """
+    service = QiskitRuntimeService()
+    job = service.job(job_id)
+    logger.info("Reconnected to IBM Runtime job %s | status=%s", job_id, job.status())
+    return _decode_sampler_result(job.result())
 
 
 def probability_of_one(counts: dict[str, int], qubit: int, shots: int) -> float:

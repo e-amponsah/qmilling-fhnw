@@ -1,0 +1,184 @@
+02:49:55 | INFO | Loading cached SMILES from /Users/goni/OQI-Hackathon-2026----FNHW-/data/raw/smiles_29_drugs.csv
+02:49:55 | INFO | All four Patzmann et al. reference variables are reproducible from the provided data: ['D50', 'MolLogP', 'Kappa3', 'apparent_solubility'].
+02:49:55 | INFO | Saved /Users/goni/OQI-Hackathon-2026----FNHW-/data/processed/modeling_table.csv (29 rows x 21 cols)
+02:49:55 | INFO | Top correlations with COMDR_15min:
+D50                    0.811339
+Kappa3                 0.310955
+Kappa1                 0.291228
+apparent_solubility   -0.275527
+Kappa2                 0.236271
+Chi0v                  0.236252
+MolWt                  0.229071
+MolLogP                0.211886
+NumRotatableBonds      0.169463
+NumHDonors            -0.166606
+Chi1v                  0.152496
+FractionCSP3           0.116756
+BertzCT                0.110113
+RingCount             -0.097542
+TPSA                  -0.031771
+NumHAcceptors         -0.000125
+02:49:56 | INFO | Saved 4 PCA diagnostic plots to /Users/goni/OQI-Hackathon-2026----FNHW-/plots/pca (4 PC(s) cover 80% variance, 7 cover 95%)
+02:49:56 | INFO | PCA redundancy clusters (features sharing a dominant PC among the top 3): {'PC1': ['MolWt', 'TPSA', 'NumHAcceptors', 'NumHDonors', 'NumRotatableBonds', 'Kappa1', 'Kappa2', 'Kappa3', 'Chi0v', 'Chi1v', 'BertzCT', 'RingCount', 'apparent_solubility'], 'PC2': ['MolLogP', 'FractionCSP3'], 'PC3': ['D50']}
+02:49:56 | INFO | Using manual feature override from .env: ['Kappa3', 'D50', 'MolLogP', 'apparent_solubility']
+02:49:56 | INFO | Using manual QCNN feature override from .env: ['Kappa3', 'D50', 'MolLogP', 'apparent_solubility', 'FractionCSP3', 'BertzCT']
+02:49:56 | INFO | Feature selection (source=manual): best_k=4, scores_by_k={}
+02:49:56 | INFO | Selected features: ['Kappa3', 'D50', 'MolLogP', 'apparent_solubility']
+02:49:56 | INFO | 6-feature subset (for the fixed 6-qubit QCNN): ['Kappa3', 'D50', 'MolLogP', 'apparent_solubility', 'FractionCSP3', 'BertzCT']
+02:49:56 | INFO | Running classical classifier: SVC_rbf
+02:49:56 | INFO |   SVC_rbf -> accuracy=0.862 f1=0.833
+02:49:56 | INFO | Running classical classifier: RandomForest
+02:49:57 | INFO |   RandomForest -> accuracy=0.897 f1=0.880
+02:49:57 | INFO | Running classical classifier: GradientBoosting
+02:49:58 | INFO |   GradientBoosting -> accuracy=0.931 f1=0.923
+02:49:58 | INFO | Saved /Users/goni/OQI-Hackathon-2026----FNHW-/data/results/classical_loocv.csv
+02:49:58 | INFO | Saved /Users/goni/OQI-Hackathon-2026----FNHW-/data/results/SVC_rbf.json
+02:49:58 | INFO | Saved /Users/goni/OQI-Hackathon-2026----FNHW-/data/results/RandomForest.json
+02:49:58 | INFO | Saved /Users/goni/OQI-Hackathon-2026----FNHW-/data/results/GradientBoosting.json
+02:49:58 | INFO | Classical LOOCV results:
+              model  accuracy        f1  recall_class0  recall_class1  n_folds  elapsed_s
+0  GradientBoosting  0.931034  0.923077         0.9375       0.923077       29   0.323687
+1      RandomForest  0.896552  0.880000         0.9375       0.846154       29   1.767482
+2           SVC_rbf  0.862069  0.833333         0.9375       0.769231       29   0.075657
+02:49:58 | INFO | Running PLS regression baseline (n_components=2, target=log(COMDR_15min))
+02:49:58 | INFO |   PLS -> Q2(LOOCV)=0.756 R2(train)=0.828 (target=log(COMDR_15min))
+02:49:58 | INFO | Saved /Users/goni/OQI-Hackathon-2026----FNHW-/data/results/pls_regression_loocv.csv
+02:49:58 | INFO | Saved /Users/goni/OQI-Hackathon-2026----FNHW-/data/results/PLS_regression.json
+02:49:58 | INFO | PLS regression LOOCV: Q2=0.756 (Patzmann benchmark Q2=0.77), R2(train)=0.828 (Patzmann R2=0.82)
+02:49:59 | INFO | Saved 11 circuit diagrams to /Users/goni/OQI-Hackathon-2026----FNHW-/plots/circuits
+02:49:59 | INFO | QuantumExecutor ready | backend=aer_simulator | shots=4096
+02:50:00 | INFO | Feature map=angle | KTA=0.2584
+02:50:01 | INFO | Feature map=entangled | KTA=0.2805
+02:50:02 | INFO | Feature map=zz | KTA=0.1944
+02:50:02 | INFO | QuantumExecutor ready | backend=aer_simulator | shots=4096
+02:50:02 | INFO | Running quantum classifier: QK-SVM_angle (backend=aer_simulator)
+02:50:34 | INFO |   QK-SVM_angle -> accuracy=0.931 f1=0.917 (31.3s)
+02:50:34 | INFO | Running quantum classifier: QK-SVM_trained (backend=aer_simulator)
+02:51:13 | INFO | Trained kernel KTA for this fold, before and after training: 0.3016 -> 0.3883
+02:51:53 | INFO | Trained kernel KTA for this fold, before and after training: 0.3181 -> 0.4104
+02:52:32 | INFO | Trained kernel KTA for this fold, before and after training: 0.3048 -> 0.3974
+02:53:12 | INFO | Trained kernel KTA for this fold, before and after training: 0.3239 -> 0.3997
+02:53:52 | INFO | Trained kernel KTA for this fold, before and after training: 0.3185 -> 0.3845
+02:54:32 | INFO | Trained kernel KTA for this fold, before and after training: 0.3229 -> 0.3840
+02:55:12 | INFO | Trained kernel KTA for this fold, before and after training: 0.3035 -> 0.3903
+02:55:51 | INFO | Trained kernel KTA for this fold, before and after training: 0.3104 -> 0.3805
+02:56:30 | INFO | Trained kernel KTA for this fold, before and after training: 0.3116 -> 0.3955
+02:57:09 | INFO | Trained kernel KTA for this fold, before and after training: 0.3219 -> 0.4090
+02:57:48 | INFO | Trained kernel KTA for this fold, before and after training: 0.3048 -> 0.4016
+02:58:28 | INFO | Trained kernel KTA for this fold, before and after training: 0.3292 -> 0.3833
+02:59:08 | INFO | Trained kernel KTA for this fold, before and after training: 0.3163 -> 0.3781
+03:01:40 | INFO | Trained kernel KTA for this fold, before and after training: 0.3815 -> 0.4227
+03:02:20 | INFO | Trained kernel KTA for this fold, before and after training: 0.3535 -> 0.3995
+03:02:59 | INFO | Trained kernel KTA for this fold, before and after training: 0.3194 -> 0.3644
+03:03:39 | INFO | Trained kernel KTA for this fold, before and after training: 0.3197 -> 0.3991
+03:04:18 | INFO | Trained kernel KTA for this fold, before and after training: 0.2983 -> 0.3811
+03:04:58 | INFO | Trained kernel KTA for this fold, before and after training: 0.3027 -> 0.3888
+03:05:39 | INFO | Trained kernel KTA for this fold, before and after training: 0.3190 -> 0.4048
+03:06:19 | INFO | Trained kernel KTA for this fold, before and after training: 0.3058 -> 0.3985
+03:06:59 | INFO | Trained kernel KTA for this fold, before and after training: 0.3087 -> 0.3971
+03:07:39 | INFO | Trained kernel KTA for this fold, before and after training: 0.3007 -> 0.3610
+03:08:19 | INFO | Trained kernel KTA for this fold, before and after training: 0.2980 -> 0.3650
+03:08:59 | INFO | Trained kernel KTA for this fold, before and after training: 0.3030 -> 0.3712
+03:09:39 | INFO | Trained kernel KTA for this fold, before and after training: 0.3207 -> 0.4105
+03:10:20 | INFO | Trained kernel KTA for this fold, before and after training: 0.3112 -> 0.4007
+03:11:00 | INFO | Trained kernel KTA for this fold, before and after training: 0.3007 -> 0.3892
+03:11:40 | INFO | Trained kernel KTA for this fold, before and after training: 0.3053 -> 0.3952
+03:11:41 | INFO |   QK-SVM_trained -> accuracy=0.966 f1=0.960 (1156.0s)
+03:11:41 | INFO | Running quantum classifier: VQC (backend=aer_simulator)
+03:13:45 | INFO |   VQC -> accuracy=0.862 f1=0.833 (124.6s)
+03:13:45 | INFO | Running QCNN on its dedicated 6-feature subset: ['Kappa3', 'D50', 'MolLogP', 'apparent_solubility', 'FractionCSP3', 'BertzCT']
+03:13:45 | INFO | QuantumExecutor ready | backend=aer_simulator | shots=4096
+03:13:45 | INFO | Running quantum classifier: QCNN (backend=aer_simulator)
+04:04:30 | INFO |   QCNN -> accuracy=0.862 f1=0.818 (217.1s)
+04:04:30 | INFO | Saved /Users/goni/OQI-Hackathon-2026----FNHW-/data/results/quantum_loocv.csv
+04:04:30 | INFO | Saved /Users/goni/OQI-Hackathon-2026----FNHW-/data/results/QK-SVM_angle.json
+04:04:30 | INFO | Saved /Users/goni/OQI-Hackathon-2026----FNHW-/data/results/QK-SVM_trained.json
+04:04:30 | INFO | Saved /Users/goni/OQI-Hackathon-2026----FNHW-/data/results/VQC.json
+04:04:30 | INFO | Saved /Users/goni/OQI-Hackathon-2026----FNHW-/data/results/QCNN.json
+04:04:30 | INFO | Quantum LOOCV results (backend=aer_simulator):
+            model  accuracy        f1  recall_class0  recall_class1  n_folds    elapsed_s
+0  QK-SVM_trained  0.965517  0.960000         1.0000       0.923077       29  1155.975293
+1    QK-SVM_angle  0.931034  0.916667         1.0000       0.846154       29    31.273117
+2             VQC  0.862069  0.833333         0.9375       0.769231       29   124.586738
+3            QCNN  0.862069  0.818182         1.0000       0.692308       29   217.115654
+04:04:31 | INFO | Saved 11 circuit diagrams to /Users/goni/OQI-Hackathon-2026----FNHW-/plots/circuits
+04:04:31 | INFO | QuantumExecutor ready | backend=aer_simulator | shots=4096
+04:04:31 | INFO | Running quantum regressor: QK-KRR_angle (backend=aer_simulator, target=log(COMDR_15min))
+04:04:32 | INFO | QK-KRR fold fit | feature_map=angle alpha=1 | ||K||_F=13.632 eff_rank=6.74
+04:04:33 | INFO | QK-KRR fold fit | feature_map=angle alpha=1 | ||K||_F=14.246 eff_rank=6.27
+04:04:34 | INFO | QK-KRR fold fit | feature_map=angle alpha=1 | ||K||_F=13.730 eff_rank=6.70
+04:04:35 | INFO | QK-KRR fold fit | feature_map=angle alpha=0.1 | ||K||_F=14.141 eff_rank=6.46
+04:04:36 | INFO | QK-KRR fold fit | feature_map=angle alpha=1 | ||K||_F=14.117 eff_rank=6.41
+04:04:37 | INFO | QK-KRR fold fit | feature_map=angle alpha=1 | ||K||_F=14.255 eff_rank=6.26
+04:04:38 | INFO | QK-KRR fold fit | feature_map=angle alpha=1 | ||K||_F=13.598 eff_rank=6.77
+04:04:39 | INFO | QK-KRR fold fit | feature_map=angle alpha=1 | ||K||_F=14.044 eff_rank=6.54
+04:04:40 | INFO | QK-KRR fold fit | feature_map=angle alpha=1 | ||K||_F=13.856 eff_rank=6.60
+04:04:41 | INFO | QK-KRR fold fit | feature_map=angle alpha=1 | ||K||_F=13.870 eff_rank=6.54
+04:04:42 | INFO | QK-KRR fold fit | feature_map=angle alpha=1 | ||K||_F=13.657 eff_rank=6.70
+04:04:44 | INFO | QK-KRR fold fit | feature_map=angle alpha=1 | ||K||_F=12.908 eff_rank=7.32
+04:04:45 | INFO | QK-KRR fold fit | feature_map=angle alpha=0.1 | ||K||_F=14.037 eff_rank=6.45
+04:04:46 | INFO | QK-KRR fold fit | feature_map=angle alpha=1 | ||K||_F=13.665 eff_rank=6.67
+04:04:47 | INFO | QK-KRR fold fit | feature_map=angle alpha=1 | ||K||_F=13.755 eff_rank=6.59
+04:04:48 | INFO | QK-KRR fold fit | feature_map=angle alpha=1 | ||K||_F=13.883 eff_rank=6.64
+04:04:49 | INFO | QK-KRR fold fit | feature_map=angle alpha=1 | ||K||_F=14.173 eff_rank=6.39
+04:04:50 | INFO | QK-KRR fold fit | feature_map=angle alpha=0.1 | ||K||_F=13.916 eff_rank=6.50
+04:04:51 | INFO | QK-KRR fold fit | feature_map=angle alpha=1 | ||K||_F=13.793 eff_rank=6.65
+04:04:52 | INFO | QK-KRR fold fit | feature_map=angle alpha=1 | ||K||_F=14.258 eff_rank=6.37
+04:04:54 | INFO | QK-KRR fold fit | feature_map=angle alpha=1 | ||K||_F=13.735 eff_rank=6.67
+04:04:55 | INFO | QK-KRR fold fit | feature_map=angle alpha=1 | ||K||_F=14.021 eff_rank=6.53
+04:04:56 | INFO | QK-KRR fold fit | feature_map=angle alpha=1 | ||K||_F=13.631 eff_rank=6.74
+04:04:57 | INFO | QK-KRR fold fit | feature_map=angle alpha=1 | ||K||_F=13.709 eff_rank=6.65
+04:04:58 | INFO | QK-KRR fold fit | feature_map=angle alpha=1 | ||K||_F=13.702 eff_rank=6.68
+04:04:59 | INFO | QK-KRR fold fit | feature_map=angle alpha=1 | ||K||_F=13.991 eff_rank=6.42
+04:05:00 | INFO | QK-KRR fold fit | feature_map=angle alpha=1 | ||K||_F=13.904 eff_rank=6.61
+04:05:01 | INFO | QK-KRR fold fit | feature_map=angle alpha=1 | ||K||_F=13.810 eff_rank=6.61
+04:05:02 | INFO | QK-KRR fold fit | feature_map=angle alpha=1 | ||K||_F=13.678 eff_rank=6.73
+04:05:04 | INFO | QK-KRR fold fit | feature_map=angle alpha=1 | ||K||_F=14.404 eff_rank=6.57
+04:05:07 | INFO |   QK-KRR_angle -> q2=0.365 r2=0.756 mae=2.829 rmse=6.243 (31.9s)
+04:05:07 | INFO | Running quantum regressor: VQR_spsa_cobyla (backend=aer_simulator, target=log(COMDR_15min))
+04:11:39 | INFO |   VQR_spsa_cobyla -> q2=0.600 r2=0.863 mae=2.759 rmse=5.762 (380.5s)
+04:11:39 | INFO | Running QCNN-R on its dedicated 6-feature subset: ['Kappa3', 'D50', 'MolLogP', 'apparent_solubility', 'FractionCSP3', 'BertzCT']
+04:11:39 | INFO | QuantumExecutor ready | backend=aer_simulator | shots=4096
+04:11:39 | INFO | Running quantum regressor: QCNN-R (backend=aer_simulator, target=log(COMDR_15min))
+04:24:53 | INFO |   QCNN-R -> q2=0.513 r2=0.807 mae=2.633 rmse=5.507 (762.0s)
+04:24:53 | INFO | Saved /Users/goni/OQI-Hackathon-2026----FNHW-/data/results/quantum_regression_loocv.csv
+04:24:53 | INFO | Saved /Users/goni/OQI-Hackathon-2026----FNHW-/data/results/QK-KRR_angle.json
+04:24:53 | INFO | Saved /Users/goni/OQI-Hackathon-2026----FNHW-/data/results/VQR_spsa_cobyla.json
+04:24:53 | INFO | Saved /Users/goni/OQI-Hackathon-2026----FNHW-/data/results/QCNN-R.json
+04:24:53 | INFO | Quantum regression LOOCV results (backend=aer_simulator, Patzmann Q2 benchmark=0.77):
+             model        r2        q2       mae      rmse      target_scale   elapsed_s
+0  VQR_spsa_cobyla  0.862887  0.599797  2.758588  5.761529  log(COMDR_15min)  380.455355
+1           QCNN-R  0.806797  0.512937  2.633270  5.506830  log(COMDR_15min)  762.030565
+2     QK-KRR_angle  0.756189  0.364606  2.828611  6.242681  log(COMDR_15min)   31.897150
+04:24:54 | INFO | Running KTA optimization (trained quantum kernel, backend=aer_simulator)...
+04:24:54 | INFO | QuantumExecutor ready | backend=aer_simulator | shots=4096
+04:27:19 | INFO | Trained kernel KTA for this fold, before and after training: 0.2951 -> 0.4039
+04:27:19 | INFO | KTA optimization: 0.2951 -> 0.4039
+04:27:19 | INFO | Running execution-degradation study (ideal vs. aer_simulator)...
+04:27:19 | INFO | QuantumExecutor ready | backend=aer_simulator | shots=4096
+04:27:19 | INFO | QuantumExecutor ready | backend=aer_noisy | shots=4096
+04:27:44 | INFO | Degradation study: baseline(aer_simulator)=0.927 comparison(aer_noisy)=0.927 degradation=0.000
+04:27:44 | INFO | Fitting deployment model + testing blind SMILES interface...
+04:27:44 | INFO | Blind prediction | Aspirin -> Non-Responder (confidence=0.134)
+04:27:44 | INFO | Blind prediction | Ibuprofen -> Non-Responder (confidence=0.187)
+04:27:44 | INFO | Saved /Users/goni/OQI-Hackathon-2026----FNHW-/data/results/unified_comparison.csv
+04:27:44 | INFO | Unified comparison:
+              model  accuracy        f1  recall_class0  recall_class1  n_folds    elapsed_s
+0    QK-SVM_trained  0.965517  0.960000         1.0000       0.923077       29  1155.975293
+1  GradientBoosting  0.931034  0.923077         0.9375       0.923077       29     0.323687
+2      QK-SVM_angle  0.931034  0.916667         1.0000       0.846154       29    31.273117
+3      RandomForest  0.896552  0.880000         0.9375       0.846154       29     1.767482
+4           SVC_rbf  0.862069  0.833333         0.9375       0.769231       29     0.075657
+5               VQC  0.862069  0.833333         0.9375       0.769231       29   124.586738
+6              QCNN  0.862069  0.818182         1.0000       0.692308       29   217.115654
+04:27:47 | INFO | Pipeline stage 'all' complete (backend=aer_simulator).
+Saved /Users/goni/OQI-Hackathon-2026----FNHW-/plots/comparison/classification_comparison.png and /Users/goni/OQI-Hackathon-2026----FNHW-/plots/comparison/classification_comparison.pdf
+Saved /Users/goni/OQI-Hackathon-2026----FNHW-/plots/comparison/roc_comparison.png and /Users/goni/OQI-Hackathon-2026----FNHW-/plots/comparison/roc_comparison.pdf
+Saved /Users/goni/OQI-Hackathon-2026----FNHW-/plots/comparison/roc_auc_summary.csv
+Saved /Users/goni/OQI-Hackathon-2026----FNHW-/plots/comparison/confusion_matrices_classical.png and /Users/goni/OQI-Hackathon-2026----FNHW-/plots/comparison/confusion_matrices_classical.pdf
+Saved /Users/goni/OQI-Hackathon-2026----FNHW-/plots/comparison/confusion_matrices_quantum.png and /Users/goni/OQI-Hackathon-2026----FNHW-/plots/comparison/confusion_matrices_quantum.pdf
+Saved /Users/goni/OQI-Hackathon-2026----FNHW-/plots/comparison/regression_comparison.png and /Users/goni/OQI-Hackathon-2026----FNHW-/plots/comparison/regression_comparison.pdf
+Saved /Users/goni/OQI-Hackathon-2026----FNHW-/plots/comparison/per_drug_regression_scatter.png and /Users/goni/OQI-Hackathon-2026----FNHW-/plots/comparison/per_drug_regression_scatter.pdf
+Saved /Users/goni/OQI-Hackathon-2026----FNHW-/plots/comparison/per_drug_classification_heatmap.png and /Users/goni/OQI-Hackathon-2026----FNHW-/plots/comparison/per_drug_classification_heatmap.pdf
+Saved /Users/goni/OQI-Hackathon-2026----FNHW-/plots/comparison/kta_comparison.png and /Users/goni/OQI-Hackathon-2026----FNHW-/plots/comparison/kta_comparison.pdf
+Saved /Users/goni/OQI-Hackathon-2026----FNHW-/plots/comparison/kta_comparison_table.csv

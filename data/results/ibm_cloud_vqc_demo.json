@@ -1,0 +1,33 @@
+{
+  "backend": "ibm_miami",
+  "shots": 4096,
+  "drugs": [
+    "Rivaroxaban",
+    "Aripiprazole",
+    "Gemfibrozil",
+    "Celecoxib",
+    "Cinnarizine"
+  ],
+  "y_true": [
+    0,
+    1,
+    0,
+    0,
+    1
+  ],
+  "y_pred": [
+    0,
+    1,
+    0,
+    0,
+    1
+  ],
+  "p_responder": [
+    0.228759765625,
+    0.877197265625,
+    0.4921875,
+    0.28515625,
+    0.760986328125
+  ],
+  "accuracy": 1.0
+}

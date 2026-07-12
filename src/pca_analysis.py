@@ -1,19 +1,13 @@
-"""PCA diagnostic on the candidate descriptor set (Task 1 supplement).
+"""PCA diagnostic on the candidate descriptor set.
 
-This PCA is not a feature reduction step, and nothing downstream trains on
-the PCA components themselves. PCA is unsupervised (it maximizes variance in
-X, not covariance with the target y), and every model in this project keeps
-physically interpretable RDKit descriptors as its input features.
-
-What PCA is used for here is finding redundancy in the 16 column candidate
-pool. For example, MolWt, Chi0v, Chi1v, Kappa1, Kappa2, Kappa3, and BertzCT
-mostly describe the same thing (molecule size) and collapse onto a single
-principal component.
-
-That redundancy information then feeds into the feature selector in
-features.py. Instead of blindly taking the top scoring descriptors, which
-tends to pick several redundant ones from the same cluster, it takes at
-most one feature per PCA cluster first.
+This is not a feature reduction step. Nothing downstream trains on the
+components themselves, every model keeps the original RDKit descriptors
+as its input. What PCA is used for here is finding redundancy in the 16
+candidate columns, since several of them (MolWt, Chi0v, Chi1v, the three
+Kappas, BertzCT) mostly describe molecule size and collapse onto one
+component. That redundancy feeds into the feature selector in features.py,
+which spreads its picks across clusters instead of grabbing several
+correlated descriptors from the same one.
 """
 
 import numpy as np
@@ -25,15 +19,10 @@ from sklearn.preprocessing import StandardScaler
 def run_pca(X: pd.DataFrame, n_components: int | None = None) -> tuple[PCA, np.ndarray, pd.DataFrame]:
     """Standardize X and fit PCA. Returns the fitted PCA object, the scores, and the loadings.
 
-    Standardization matters here because the raw descriptors live on very
-    different scales (MolWt is in the hundreds, NumHDonors is a small
-    integer, BertzCT is in the hundreds to thousands). Without scaling,
-    the high magnitude columns would dominate every component just because
-    of their units, not because they carry more real structure.
-
-    The loadings table is features by components, scaled by the square
-    root of the explained variance so that magnitudes are comparable
-    across components.
+    Standardization matters because the descriptors sit on very different
+    scales (MolWt in the hundreds, NumHDonors a small integer, BertzCT in
+    the thousands). Without it, the largest-magnitude columns would
+    dominate every component just from their units, not real structure.
     """
     feats = list(X.columns)
     n_components = n_components or min(len(feats), len(X) - 1)
@@ -64,15 +53,12 @@ def redundancy_aware_topk(
     scores: np.ndarray, feature_names: np.ndarray, clusters: dict[str, int], k: int
 ) -> list[str]:
     """Pick k features ranked by score, but spread the picks across PCA
-    clusters instead of taking the top k regardless of cluster.
-
-    The best scoring feature from each cluster is taken first, going
-    through clusters in score order. Only once every cluster has
-    contributed one feature does a second feature from the same cluster
-    get considered. This avoids picking several highly correlated
-    descriptors, such as Kappa1, Kappa2, Kappa3 and Chi0v, which all load
-    on the same size related component and add little beyond what one of
-    them already captures.
+    clusters instead of just taking the top k. The best feature from each
+    cluster is taken first, and a second feature from the same cluster
+    only gets considered once every cluster has contributed one. This
+    keeps highly correlated descriptors like Kappa1, Kappa2, Kappa3 and
+    Chi0v, which all load on the same size related component, from filling
+    up the whole selection.
     """
     order = np.argsort(-scores)
     ranked_features = [feature_names[i] for i in order]

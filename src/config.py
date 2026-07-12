@@ -70,19 +70,16 @@ FEATURE_SELECT_K_RANGE = (4, 6)
 # Patzmann et al. 2024 benchmark: Q^2 from LOOCV regression on COMDR_15.
 PATZMANN_Q2_BENCHMARK = 0.77
 
-#  Manual feature override
-# Set MANUAL_FEATURES in .env as a comma separated list of column names to skip
-# the automated feature selection and use an exact hand-picked list for every model instead.
+# Manual feature override
+# Set MANUAL_FEATURES in .env as a comma separated list to skip automated
+# feature selection and use an exact hand-picked list for every model.
 _manual_features_raw = os.environ.get("MANUAL_FEATURES", "").strip()
 MANUAL_FEATURES: list[str] | None = (
     [f.strip() for f in _manual_features_raw.split(",") if f.strip()] if _manual_features_raw else None
 )
 
-# Set MANUAL_FEATURES_QCNN in .env as a comma separated list of EXACTLY 6
-# column names (one per qubit) to hand-pick the fixed-size feature subset
-# used by the QCNN / QCNN-R models, independently of MANUAL_FEATURES (which
-# covers every other model). Leave unset to keep the automated 6-feature
-# selection (see get_modeling_features in src/features.py).
+# Same idea but just for the QCNN, which always needs exactly 6 features.
+# Leave unset to fall back to automated 6-feature selection.
 _manual_features_qcnn_raw = os.environ.get("MANUAL_FEATURES_QCNN", "").strip()
 MANUAL_FEATURES_QCNN: list[str] | None = (
     [f.strip() for f in _manual_features_qcnn_raw.split(",") if f.strip()] if _manual_features_qcnn_raw else None

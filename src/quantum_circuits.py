@@ -1,23 +1,19 @@
 """Circuit builders for the quantum feature maps and ansatze used across the project.
 
-This file only defines circuit shapes. Nothing in here runs a circuit or
-touches any data, that happens in quantum_backend.py and quantum_models.py.
-Three feature map styles are provided so their expressibility can be
-compared (this is Task 3 of the challenge):
+This file only defines circuit shapes. Nothing here runs a circuit or
+touches data, that happens in quantum_backend.py and quantum_models.py.
 
-- angle_feature_map: one Ry rotation per qubit, then an optional CNOT chain.
-  This is the baseline encoding described in the challenge brief.
-- entangled_feature_map: the angle encoding repeated a few times with a
-  CNOT ring after each repetition, to see if extra entanglement alone
-  helps without adding any trainable parameters.
-- zz_feature_map: Qiskit's built in ZZFeatureMap, which adds pairwise
-  interaction terms between qubits on top of angle encoding.
+Three feature maps are provided so their expressibility can be compared
+directly: angle_feature_map (one Ry per qubit plus a CNOT chain, the
+baseline encoding), entangled_feature_map (the same encoding repeated with
+a closed CNOT ring each time, to test whether more entanglement alone
+helps), and zz_feature_map (Qiskit's ZZFeatureMap, which adds pairwise
+interaction terms on top of angle encoding).
 
 reuploading_layer and variational_ansatz build the trainable circuits used
 by the data re-uploading classifier, the VQC, and the trained quantum
-kernel. Every builder function returns the circuit plus its parameter
-vectors, so the caller can bind data values and, where relevant, trainable
-weights separately.
+kernel. Every builder returns the circuit plus its parameter vectors, so
+the caller can bind data values and trainable weights separately.
 """
 
 import numpy as np
@@ -130,43 +126,17 @@ def build_vqc_circuit(n_features: int, n_layers: int = 2) -> tuple[QuantumCircui
 def zzplus_feature_map(
     n_features: int, reps: int = 3, full_entanglement: bool = True
 ) -> tuple[QuantumCircuit, ParameterVector]:
-    """Extended ZZ feature map: a linear `ZZFeatureMap` plus two extra
-    circular ZZ couplings closing the entanglement ring.
-
-    Built on top of Qiskit's `ZZFeatureMap` (angle encoding + pairwise ZZ
-    interaction terms between linear neighbours), then -- if
-    `full_entanglement` and there are enough qubits -- two more pairwise ZZ
-    interactions are appended manually: (0, n-2) and (1, n-1). These are
-    added as a single CX-RZ-CX block per pair *after* the base map rather
-    than by re-instantiating `ZZFeatureMap` with a different entanglement
-    map, so no parameters are duplicated across `reps`. The appended phase
-    uses the same convention as `ZZFeatureMap`'s own pairwise term (Qiskit's
-    default `self_product` data map): phi(x_i, x_j) = (pi - x_i) * (pi - x_j).
-
-    Physically, every ZZ term encodes a product x_i * x_j of two features --
-    correlations that a pure angle encoding (independent Ry rotations)
-    cannot represent. The two extra circular couplings reach qubit pairs
-    that a purely linear entanglement map skips, giving the induced kernel
-    more pairwise structure to work with without adding qubits or reps.
-
-    Parameters
-    ----------
-    n_features : int
-        Number of qubits / classical features encoded.
-    reps : int, default=3
-        Repetitions of the base `ZZFeatureMap` block.
-    full_entanglement : bool, default=True
-        If True and `n_features >= 4`, append the two circular ZZ couplings.
-
-    Returns
-    -------
-    tuple[QuantumCircuit, ParameterVector]
-        The bound circuit and its length-`n_features` data ParameterVector.
+    """A linear ZZFeatureMap plus two extra circular ZZ couplings that close
+    the entanglement ring the linear map otherwise skips: (0, n-2) and
+    (1, n-1), appended after the base map with the same phase convention
+    ZZFeatureMap already uses. Every ZZ term encodes a product of two
+    features, a correlation plain angle encoding cannot represent, and the
+    two extra couplings give the induced kernel more pairwise structure
+    without adding qubits or repetitions.
     """
     x = ParameterVector("x", n_features)
-    # Build the base ZZFeatureMap on its own parameters, then rebind those
-    # parameters to `x` so the extra couplings below share the same
-    # ParameterVector instance instead of introducing a second one.
+    # Build the base map on its own parameters, then rebind to x so the
+    # extra couplings below share this ParameterVector instead of a second one.
     base = ZZFeatureMap(feature_dimension=n_features, reps=reps, entanglement="linear")
     bound_base = base.assign_parameters(dict(zip(base.parameters, x)))
 
@@ -187,33 +157,16 @@ def zzplus_feature_map(
 def regression_ansatz(
     n_qubits: int, n_layers: int, n_output_qubits: int = 3
 ) -> tuple[QuantumCircuit, ParameterVector]:
-    """Trainable ansatz for continuous-output regression: Ry/Rz/Ry rotation
-    layers (three rotations per qubit per layer, more expressive than the
-    VQC's Ry/Rz ansatz) with circular CNOT entanglement, ending in a
-    Ry-only layer applied only to the first `n_output_qubits` qubits.
+    """Trainable ansatz for continuous-output regression: Ry, Rz, Ry rotation
+    layers (more expressive than the VQC's Ry, Rz ansatz) with circular
+    CNOT entanglement, ending in a Ry-only layer on just the first
+    n_output_qubits qubits. That final layer only needs to touch the
+    qubits that actually get read out afterward.
 
-    That final partial layer exists to maximize the variance of the
-    <Z_i> expectation values that will actually be read out (see
-    `VariationalQuantumRegressor`) -- qubits that are never read out don't
-    need a dedicated final rotation, only enough entanglement to have
-    already influenced the output qubits' state.
-
-    Total trainable parameters: `n_layers * n_qubits * 3 + n_output_qubits`.
-
-    Parameters
-    ----------
-    n_qubits : int
-    n_layers : int
-        Depth knob. With `n_qubits=6`, `n_layers=2` gives 42 parameters --
-        close to overparameterizing a 28-sample LOOCV training fold, so
-        callers should default to `n_layers=1` (21 params) and only raise
-        it if LOOCV shows clear underfitting.
-    n_output_qubits : int, default=3
-        Number of qubits whose <Z> is intended to be measured downstream.
-
-    Returns
-    -------
-    tuple[QuantumCircuit, ParameterVector]
+    Total trainable parameters: n_layers * n_qubits * 3 + n_output_qubits.
+    With n_qubits=6, n_layers=2 already gives 42 parameters, close to
+    overparameterizing a 28-sample LOOCV fold, so callers should default
+    to n_layers=1 (21 params) and only raise it if LOOCV clearly underfits.
     """
     if n_output_qubits > n_qubits:
         raise ValueError(f"n_output_qubits ({n_output_qubits}) cannot exceed n_qubits ({n_qubits})")

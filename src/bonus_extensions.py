@@ -53,9 +53,9 @@ def execution_degradation_study(
     evaluation already goes through quantum_backend.py.
 
     This uses k-fold cross validation rather than the full 29 fold LOOCV
-    used for the main Task 4 suite, because a noisy or real hardware
+    used for the main quantum suite, because a noisy or real hardware
     kernel evaluation costs one real circuit execution per pair per fold.
-    That is a deliberate tradeoff for this exploratory bonus study. It
+    That is a deliberate tradeoff for this exploratory bonus study and
     does not apply to the required LOOCV evaluation elsewhere.
     """
     from src.quantum_models import FEATURE_MAPS
@@ -110,7 +110,7 @@ class BlindPredictor:
     predict_proba method.
 
     D50 (the experimental particle size) and apparent_solubility (measured
-    in FaSSIF) cannot be computed from a SMILES string alone -- both are in
+    in FaSSIF) cannot be computed from a SMILES string alone, both are in
     EXPERIMENTAL_FEATURE_COLS (src/config.py). If the model's feature list
     includes either one, callers must pass it explicitly with
     predict(smiles, D50=..., apparent_solubility=...). Leaving one out

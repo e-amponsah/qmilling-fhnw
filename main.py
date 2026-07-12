@@ -137,9 +137,9 @@ def plot_feature_correlation_heatmap(X_full: pd.DataFrame, data: pd.DataFrame) -
 
 
 def plot_pca_diagnostics(X_full: pd.DataFrame, data: pd.DataFrame) -> tuple:
-    """Draw the PCA diagnostic plots for Task 1: a scree plot, a PC1 vs PC2
-    scatter colored by Responder or Non-Responder, a loadings biplot, and
-    each component's correlation with the continuous target.
+    """Draw the PCA diagnostic plots: a scree plot, a PC1 vs PC2 scatter
+    colored by Responder or Non-Responder, a loadings biplot, and each
+    component's correlation with the continuous target.
 
     See pca_analysis.py for why PCA is used as a diagnostic here rather
     than a feature reduction step. Returns the fitted PCA object, scores,
@@ -288,7 +288,7 @@ def stage_features() -> tuple[pd.DataFrame, dict]:
 # --- Stage 2: classical baselines --------------------------------------------
 
 def stage_classical_classification(data: pd.DataFrame, selection: dict) -> dict:
-    """Classical classifiers only (SVC/RandomForest/GradientBoosting) --
+    """Classical classifiers only (SVC, RandomForest, GradientBoosting),
     runnable standalone via `--stage classical-classification`.
     """
     selected_features = selection["selected_features"]
@@ -304,7 +304,7 @@ def stage_classical_classification(data: pd.DataFrame, selection: dict) -> dict:
 
 
 def stage_classical_regression(data: pd.DataFrame, selection: dict) -> dict:
-    """PLS regression baseline only -- runnable standalone via
+    """PLS regression baseline only, runnable standalone via
     `--stage classical-regression`.
     """
     selected_features = selection["selected_features"]
@@ -333,23 +333,23 @@ def stage_classical_regression(data: pd.DataFrame, selection: dict) -> dict:
 
 
 def stage_classical(data: pd.DataFrame, selection: dict) -> dict:
-    """Both classical stages together -- used by `--stage classical` / `all`."""
+    """Both classical stages together, used by `--stage classical` / `all`."""
     clf_results = stage_classical_classification(data, selection)
     stage_classical_regression(data, selection)
     return clf_results
 
 
-# --- Circuit diagrams (Task 3 deliverable) -----------------------------------
+# --- Circuit diagrams ---------------------------------------------------------
 
 def plot_circuit_diagrams(n_features: int, n_qcnn_features: int = 6) -> None:
     """Render one diagram per distinct circuit shape used across every
-    registered quantum model (classification + regression), each saved
+    registered quantum model (classification and regression), each saved
     under a filename that names the model(s) that use it.
 
-    `zz_feature_map` / `entangled_feature_map` stay in the Task 3 kernel
-    comparison below even though no classifier currently uses them by
-    that name, since that comparison is about encoding geometry, not
-    which model is registered.
+    zz_feature_map and entangled_feature_map stay in the kernel comparison
+    below even though no classifier currently uses them by that name,
+    since that comparison is about encoding geometry, not which model is
+    registered.
     """
     angle_circ = FEATURE_MAPS["angle"](n_features)[0]
     entangled_circ = FEATURE_MAPS["entangled"](n_features)[0]
@@ -362,16 +362,16 @@ def plot_circuit_diagrams(n_features: int, n_qcnn_features: int = 6) -> None:
     qcnn_circ = build_qcnn_circuit(n_qcnn_features)[0]
 
     circuits = {
-        # Feature maps (Task 3 comparison).
+        # Feature map comparison.
         "angle_feature_map": angle_circ,
         "entangled_feature_map": entangled_circ,
         "zz_feature_map": zz_circ,
         "zzplus_feature_map": zzplus_circ,
-        # Ansatze / full model circuits not already covered above.
+        # Ansatze and full model circuits not already covered above.
         "vqc_ansatz": vqc_circ,
         "vqr_circuit": vqr_circ,
         "qcnn": qcnn_circ,
-        # Explicit per-model aliases -- QK-SVM's fixed vs. trained kernel,
+        # Explicit per-model aliases: QK-SVM's fixed vs. trained kernel,
         # and every other registered model that would otherwise have no
         # image discoverable under its own name.
         "qk_svm_angle_kernel": angle_circ,
@@ -388,7 +388,7 @@ def plot_circuit_diagrams(n_features: int, n_qcnn_features: int = 6) -> None:
 
 def plot_quantum_regression_q2(reg_table: pd.DataFrame) -> None:
     """Bar chart of each quantum regressor's LOOCV Q^2 against the Patzmann
-    et al. Q^2=0.77 benchmark line -- the regression-suite counterpart of
+    et al. Q^2=0.77 benchmark line, the regression counterpart of
     `stage_unified_comparison`'s classification accuracy bar chart.
     """
     fig, ax = plt.subplots(figsize=(7, 4.5))
@@ -408,13 +408,13 @@ def plot_quantum_regression_q2(reg_table: pd.DataFrame) -> None:
     plt.close(fig)
 
 
-# --- Stage 3: quantum feature map + models -----------------------------------
+# --- Stage 3: quantum feature map and models -----------------------------------
 
 def _sliced_features_and_targets(data: pd.DataFrame, selection: dict, max_samples: int | None):
     """Shared setup for both quantum sub-stages: the standard
     selected-feature matrix, the dedicated 6-feature QCNN subset, and both
-    targets, all consistently sliced by `max_samples` (a smoke-test cap,
-    not the full Task 4 deliverable, when set below 29).
+    targets, all consistently sliced by max_samples (a smoke-test cap,
+    not a full run, when set below 29).
     """
     selected_features = selection["selected_features"]
     X = data[selected_features].values
@@ -435,8 +435,8 @@ def _sliced_features_and_targets(data: pd.DataFrame, selection: dict, max_sample
 def stage_quantum_classification(
     data: pd.DataFrame, selection: dict, execution_config: ExecutionConfig, max_samples: int | None
 ) -> dict:
-    """Quantum classifiers only (Task 3 kernel/KTA diagnostics + Task 4
-    classification LOOCV) -- runnable standalone via
+    """Quantum classifiers only (the kernel and KTA diagnostics plus the
+    classification LOOCV run), runnable standalone via
     `--stage quantum-classification`.
     """
     from sklearn.preprocessing import MinMaxScaler
@@ -446,7 +446,7 @@ def stage_quantum_classification(
 
     plot_circuit_diagrams(n_features=len(selected_features), n_qcnn_features=len(selection["features_by_k"][6]))
 
-    # Task 3: kernel heatmap and KTA score for each feature map, sharing one executor.
+    # Kernel heatmap and KTA score for each feature map, sharing one executor.
     kernel_executor = QuantumExecutor(execution_config)
     raw_kta_by_feature_map = {}
     for fm_name in ["angle", "entangled", "zz"]:
@@ -472,9 +472,9 @@ def stage_quantum_classification(
         {"feature_map": list(raw_kta_by_feature_map), "kta": list(raw_kta_by_feature_map.values())}
     ).to_csv(RESULTS_DIR / "kernel_kta_by_feature_map.csv", index=False)
 
-    # Task 4: run the full quantum classifier suite under LOOCV. The QCNN
-    # needs exactly 6 qubits, so it runs separately on its own 6 feature
-    # subset instead of whatever k the automated selector picked for the others.
+    # Run the full quantum classifier suite under LOOCV. The QCNN needs
+    # exactly 6 qubits, so it runs separately on its own 6 feature subset
+    # instead of whatever k the automated selector picked for the others.
     non_qcnn_names = [n for n in QUANTUM_MODEL_BUILDERS if n != "QCNN"]
     quantum_results = run_quantum_classification_suite(X, y, execution_config=execution_config, model_names=non_qcnn_names)
 
@@ -507,11 +507,11 @@ def stage_quantum_classification(
 def stage_quantum_regression(
     data: pd.DataFrame, selection: dict, execution_config: ExecutionConfig, max_samples: int | None
 ) -> dict:
-    """Quantum regressors only (QK-KRR, VQR, QCNN-R),
-    predicting COMDR_15min directly -- comparable to the Patzmann
-    Q^2=0.77 / R^2=0.82 benchmark. Runnable standalone via
-    `--stage quantum-regression`. QCNN-R shares QCNN's fixed-6-qubit
-    constraint, so it runs on the dedicated 6-feature subset.
+    """Quantum regressors only (QK-KRR, VQR, QCNN-R), predicting
+    COMDR_15min directly, comparable to the Patzmann Q^2=0.77 and
+    R^2=0.82 benchmark. Runnable standalone via `--stage
+    quantum-regression`. QCNN-R shares QCNN's fixed 6-qubit constraint,
+    so it runs on the dedicated 6-feature subset.
     """
     selected_features = selection["selected_features"]
     X, X_qcnn, _, y_reg = _sliced_features_and_targets(data, selection, max_samples)
@@ -539,7 +539,7 @@ def stage_quantum_regression(
 
 
 def stage_quantum(data: pd.DataFrame, selection: dict, execution_config: ExecutionConfig, max_samples: int | None) -> dict:
-    """Both quantum stages together -- used by `--stage quantum` / `all`."""
+    """Both quantum stages together, used by `--stage quantum` / `all`."""
     quantum_results = stage_quantum_classification(data, selection, execution_config, max_samples)
     stage_quantum_regression(data, selection, execution_config, max_samples)
     return quantum_results
@@ -624,8 +624,8 @@ def stage_unified_comparison(clf_results: dict, quantum_results: dict) -> None:
     fig.savefig(PLOTS_DIR / "unified_comparison.png", dpi=150)
     plt.close(fig)
 
-    # The richer classical-vs-quantum comparison suite (ROC/AUC, KTA
-    # before/after, per-drug scatter/heatmap, etc.) -- see
+    # The richer classical vs quantum comparison suite (ROC/AUC, KTA
+    # before/after, per-drug scatter/heatmap, etc.) lives in
     # scripts/plot_model_comparison.py. Reads the *.json files every
     # classification/regression stage above already writes via
     # save_results_json, so it needs no arguments here; run it by hand

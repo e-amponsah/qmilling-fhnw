@@ -572,12 +572,11 @@ def _select_alpha_via_inner_loocv(
     K_norm: np.ndarray, y: np.ndarray, alpha_grid: tuple[float, ...], default_alpha: float
 ) -> float:
     """Pick the alpha_grid candidate with the best Q^2 under a leave-one-out
-    sweep *within* the training fold (never touching the outer LOOCV's
-    held-out sample -- this is called from inside `fit`, which only ever
-    sees a training fold). No new quantum circuits are needed: every
-    candidate alpha is scored by refitting `KernelRidge` on submatrices of
-    the already-computed `K_norm`, since fidelity is a fixed, precomputed
-    kernel independent of alpha.
+    sweep within the training fold only, never touching the outer LOOCV's
+    held-out sample. No new quantum circuits are needed: every candidate
+    alpha is scored by refitting KernelRidge on submatrices of the already
+    computed K_norm, since fidelity is a fixed, precomputed kernel that
+    does not depend on alpha.
     """
     n = len(y)
     best_alpha, best_q2 = default_alpha, -np.inf
@@ -599,40 +598,20 @@ def _select_alpha_via_inner_loocv(
 
 class QuantumKernelRidgeRegression:
     """QK-KRR: the same real-execution fidelity kernel machinery as
-    `QuantumKernelSVM`, but with a `KernelRidge` regression head instead of
-    an `SVC` classifier, predicting COMDR15 directly as a continuous value.
+    QuantumKernelSVM, but with a KernelRidge regression head instead of an
+    SVC classifier, predicting COMDR15 directly as a continuous value. This
+    is the first model in this suite directly comparable to the Patzmann
+    et al. Q^2=0.77 benchmark, since it targets the regression problem
+    instead of thresholding it into a binary class.
 
-    This is the first model in this suite directly comparable to the
-    Patzmann et al. Q^2=0.77 benchmark table, since it targets the
-    regression problem instead of thresholding it into a binary class.
-
-    Parameters
-    ----------
-    executor : QuantumExecutor
-    feature_map_name : str, default="zzplus"
-        Key into `FEATURE_MAPS`. `zzplus` is recommended: its ZZ terms
-        encode feature products (e.g. logP * kappa3-like correlations) that
-        plain angle encoding cannot represent.
-    alpha : float, default=0.1
-        Fallback L2 regularization if `alpha_grid` search is skipped.
-    alpha_grid : tuple[float, ...], default=(0.01, 0.1, 1.0)
-        Candidate regularizations swept via an inner LOOCV *within* the
-        training fold only (never touching the outer LOOCV's held-out
-        sample) -- the best-Q^2 alpha is kept as `alpha_`.
-    feature_map_kwargs : dict, optional
-
-    Attributes
-    ----------
-    alpha_ : float
-        Alpha actually selected by the inner sweep.
-    kernel_frobenius_norm_ : float
-        ||K_train||_F of the normalized training kernel -- an
-        expressibility diagnostic (a near-identity kernel, ||K||_F close to
-        sqrt(n), tells you the feature map barely separates any two drugs).
-    kernel_effective_rank_ : float
-        exp(entropy of K_train's normalized eigenvalue spectrum) -- a soft
-        rank estimate that degrades gracefully as eigenvalues decay
-        smoothly, unlike a hard-threshold matrix rank.
+    feature_map_name defaults to "zzplus": its ZZ terms encode feature
+    products that plain angle encoding cannot represent. alpha_grid is
+    swept via an inner LOOCV inside the training fold only, and the best
+    value is stored as alpha_. Two fitted diagnostics are also kept:
+    kernel_frobenius_norm_ (a near-identity kernel, with a Frobenius norm
+    close to sqrt(n), means the feature map barely separates any two
+    drugs) and kernel_effective_rank_ (a soft rank estimate from the
+    entropy of the kernel's eigenvalue spectrum).
     """
 
     def __init__(
@@ -688,10 +667,10 @@ class QuantumKernelRidgeRegression:
     def _kernel_to_train(self, X: np.ndarray) -> np.ndarray:
         X = np.asarray(X, dtype=float)
         K = _fidelity_kernel_via_backend(self.executor, self._qc, self._x_params, X, self._X_train, symmetric=False)
-        # Test self-fidelities measured for real (never assumed to be
-        # exactly 1) so the normalization stays honest under noise/hardware
-        # execution too -- one extra batched job, cheap since X is a single
-        # LOOCV-held-out sample in the standard pipeline.
+        # Test self-fidelities measured for real, never assumed to be
+        # exactly 1, so the normalization stays honest under noise or
+        # hardware execution too. One extra batched job, cheap since X is
+        # a single LOOCV held-out sample in the standard pipeline.
         K_self = _fidelity_kernel_via_backend(self.executor, self._qc, self._x_params, X, X, symmetric=True)
         diag_test = np.clip(np.diag(K_self), 1e-12, None)
         return _normalize_fidelity_kernel(K, diag_test, self._K_diag_train)
@@ -706,33 +685,25 @@ class QuantumKernelRidgeRegression:
 # --- 6. Multi-observable quantum regressors (VQR, QCNN-R) --------------------
 
 class _MultiObservableRegressorCore:
-    """Shared fit/predict machinery for the two multi-observable quantum
-    regressors: `VariationalQuantumRegressor` and `QCNNRegressor`. Both
-    read <Z_i> expectation values off several output qubits and combine
-    them with a classical `Ridge` head, so all of that logic lives here once.
+    """Shared fit and predict machinery for the two multi-observable quantum
+    regressors, VariationalQuantumRegressor and QCNNRegressor. Both read
+    <Z_i> expectation values off several output qubits and combine them
+    with a classical Ridge head, so all of that logic lives here once.
 
-    Subclasses implement `_build_circuit(n_features)`, returning
-    `(circuit, x_params, theta_params, output_qubits)`.
+    Subclasses implement _build_circuit(n_features), returning (circuit,
+    x_params, theta_params, output_qubits).
 
-    Two-phase optimizer -- "warm SPSA, then local COBYLA":
-      Phase 1 runs `maxiter_spsa` SPSA iterations against the MSE between
-      the Ridge head's prediction and y. SPSA needs only one Sampler job of
-      2N circuits per iteration regardless of parameter count, so it
-      explores the (potentially flat / barren-plateau-prone) MSE surface
-      cheaply and lands in a reasonable basin.
-      Phase 2 runs `maxiter_cobyla` COBYLA iterations from that warm start,
-      refining locally without SPSA's residual stochastic gradient noise.
-    This two-phase split is a practical response to small-dataset (N=29)
-    variational training: SPSA alone plateaus slowly from a random start,
-    while COBYLA alone (no gradient signal) frequently stalls near its
-    random initialization on a landscape this non-convex.
-
-    Note: the "top-10 parameters by SPSA-estimated gradient" refinement
-    described in early planning notes was simplified to full-parameter
-    COBYLA refinement from the SPSA warm start -- partial-parameter local
-    search would bias which directions get refined based on a single noisy
-    SPSA gradient estimate, which is not obviously more robust than just
-    refining every parameter from a good starting point.
+    Training runs in two phases: warm SPSA, then local COBYLA. Phase one
+    runs maxiter_spsa SPSA iterations against the MSE between the Ridge
+    head's prediction and y. SPSA needs only one Sampler job of 2N
+    circuits per iteration regardless of parameter count, so it explores
+    the MSE surface cheaply and lands in a reasonable basin. Phase two
+    runs maxiter_cobyla COBYLA iterations from that warm start, refining
+    locally without SPSA's residual gradient noise. This split works
+    better than either optimizer alone on a small, 29 sample dataset:
+    SPSA by itself plateaus slowly from a random start, and COBYLA by
+    itself often stalls near its starting point on a landscape this
+    non-convex.
     """
 
     def __init__(
@@ -843,21 +814,16 @@ class _MultiObservableRegressorCore:
 
 
 class VariationalQuantumRegressor(_MultiObservableRegressorCore):
-    """VQR: angle encoding + `regression_ansatz` + multi-observable readout,
-    predicting COMDR15 continuously instead of `VariationalQuantumClassifier`'s
-    single-qubit P(|1>) in {0, 1}. See `_MultiObservableRegressorCore` for
-    the shared fit/predict/optimization machinery.
+    """VQR: angle encoding plus regression_ansatz plus multi-observable
+    readout, predicting COMDR15 continuously instead of
+    VariationalQuantumClassifier's single-qubit P(|1>) in {0, 1}. See
+    _MultiObservableRegressorCore for the shared fit, predict, and
+    optimization machinery.
 
-    Parameters
-    ----------
-    n_layers : int, default=1
-        `regression_ansatz` depth. Kept at 1 by default (21 params for
-        n_qubits=6) rather than the more expressive `n_layers=2` (42
-        params) to avoid over-parameterizing a 28-sample LOOCV training
-        fold; raise deliberately if LOOCV shows clear underfitting.
-    n_output_qubits : int, default=3
-    maxiter_spsa, maxiter_cobyla, ridge_alpha, random_state :
-        See `_MultiObservableRegressorCore`.
+    n_layers defaults to 1 (21 parameters for n_qubits=6) rather than the
+    more expressive n_layers=2 (42 parameters), to avoid over-parameterizing
+    a 28 sample LOOCV training fold. Raise it deliberately if LOOCV shows
+    clear underfitting.
     """
 
     def __init__(self, n_layers: int = 1, n_output_qubits: int = 3, **kwargs):
@@ -871,17 +837,16 @@ class VariationalQuantumRegressor(_MultiObservableRegressorCore):
 
 
 class QCNNRegressor(_MultiObservableRegressorCore):
-    """QCNN-R: the same 6-qubit conv+pool+dense-SU(4) architecture as
-    `QCNNClassifier`, reused for regression by reading out BOTH surviving
-    qubits' <Z> expectation values (instead of thresholding a single
-    qubit's P(|1>) into a class) and combining them with a classical Ridge
-    head. This gives the existing QCNN a direct regression counterpart,
-    rounding out the regression suite to 3 models: QK-KRR, VQR, and QCNN-R.
+    """QCNN-R: the same 6-qubit conv, pool, and dense SU(4) architecture as
+    QCNNClassifier, reused for regression by reading out both surviving
+    qubits' <Z> expectation values instead of thresholding a single
+    qubit's P(|1>) into a class, and combining them with a classical Ridge
+    head.
 
-    Requires exactly `n_qubits` (default 6) input features, same fixed-size
-    constraint as `QCNNClassifier` -- run it on the dedicated 6-feature
-    subset (`selection["features_by_k"][6]`), not whichever k the automated
-    selector found best for the other models.
+    Requires exactly n_qubits (default 6) input features, the same
+    fixed-size constraint as QCNNClassifier, so run it on the dedicated
+    6-feature subset rather than whichever k the automated selector picked
+    for the other models.
     """
 
     def __init__(self, n_qubits: int = 6, **kwargs):
@@ -898,26 +863,19 @@ class QCNNRegressor(_MultiObservableRegressorCore):
 # Each model builder takes the shared QuantumExecutor (resolved once per
 # suite run) and returns a fresh, unfitted model. This is called once per
 # LOOCV fold.
+#
 # Every variational model below gets its own random_state offset from the
-# shared RANDOM_SEED rather than all defaulting to the same value. This
-# doesn't change any single model's own LOOCV result (each was verified to
-# already produce distinct per-sample predictions from the others even
-# under a shared seed -- small-N aggregate metrics can coincide by chance,
-# see the README/investigation notes), but sharing one RNG stream across
-# architecturally different models is still bad practice for a comparison
-# suite -- it needlessly correlates their initial parameter draws instead
-# of letting each model's result be independent evidence.
+# shared RANDOM_SEED instead of all defaulting to the same value, so that
+# architecturally different models don't share one correlated RNG stream.
 QUANTUM_MODEL_BUILDERS = {
     "QK-SVM_angle": lambda executor: QuantumKernelSVM(executor=executor, feature_map_name="angle"),
-    # maxiter is set lower here than the class default of 60. The trained
+    # maxiter is lower here than the class default of 60. The trained
     # kernel model recomputes a full kernel matrix on every COBYLA
-    # iteration, which costs far more real circuit executions per step
-    # than the other variational models below. maxiter=30 gets most of the
-    # benefit at a fraction of the runtime. For the full quality version
-    # (96.6% accuracy with n_layers=3 and maxiter=60), construct
-    # TrainedQuantumKernelSVM directly with those settings, the same way
-    # the KTA demo in bonus_extensions.py does. See the README for the
-    # comparison between different settings.
+    # iteration, which is far more expensive per step than the other
+    # variational models, so maxiter=30 gets most of the benefit at a
+    # fraction of the runtime. For the full quality version, 96.6% accuracy
+    # with n_layers=3 and maxiter=60, construct TrainedQuantumKernelSVM
+    # directly with those settings.
     "QK-SVM_trained": lambda executor: TrainedQuantumKernelSVM(
         executor=executor, n_layers=3, maxiter=30, random_state=RANDOM_SEED + 1
     ),
@@ -929,49 +887,33 @@ QUANTUM_MODEL_BUILDERS = {
     ),
 }
 
-# Regression counterparts, kept in a separate registry (and run through
-# `run_quantum_regression_suite` / `loocv_evaluate_regression`) since they
+# Regression counterparts, kept in a separate registry and run through
+# run_quantum_regression_suite / loocv_evaluate_regression, since they
 # predict COMDR15 continuously rather than the binary responder label that
-# every entry in QUANTUM_MODEL_BUILDERS above targets. QCNN-R has the same
-# fixed-6-qubit constraint as QCNN in QUANTUM_MODEL_BUILDERS -- callers
-# should run it on the dedicated 6-feature subset, same as the classifier.
+# QUANTUM_MODEL_BUILDERS above targets. QCNN-R has the same fixed 6-qubit
+# constraint as QCNN, so run it on the dedicated 6-feature subset too.
 QUANTUM_REGRESSION_MODEL_BUILDERS = {
-    # feature_map_name="angle", not zzplus (despite the class default and
-    # the module docstring's original zzplus recommendation): measured
-    # against the real 29-drug dataset (4-feature MANUAL_FEATURES set,
-    # log-target, aer_simulator), zzplus/zz both severely overfit --
-    # r2_train ~0.98-0.99 (near-perfect memorization) but q2_loocv < 0
-    # (worse than predicting the training mean) at every reps in {1,2,3}.
-    # This is the classic quantum-kernel-concentration failure mode
-    # (Thanasilp et al. 2022; Kubler et al. 2021): ZZ cross-terms push the
-    # induced Hilbert space's off-diagonal fidelities toward a small,
-    # near-uniform value once qubit count/depth outgrows what 28 training
-    # samples can constrain, and no amount of extra KernelRidge alpha
-    # regularization recovers it (the inner alpha sweep kept picking the
-    # *smallest* candidate even up to alpha_grid=(...,100.0), meaning more
-    # shrinkage wasn't the fix -- the kernel itself carried too little
-    # signal). Dropping to the plain angle encoding (no ZZ interactions)
-    # measured q2_loocv=0.52 on the same data/settings, so it is the
-    # default here instead. alpha_grid is kept wider than the class's own
-    # default (0.01-1.0) as a safety margin.
+    # feature_map_name is "angle" here, not zzplus. Testing on the real
+    # 29-drug dataset showed zzplus and zz both severely overfit: training
+    # R^2 near 0.98 but LOOCV Q^2 below zero, worse than just predicting
+    # the training mean. This is the known quantum kernel concentration
+    # problem, where ZZ cross terms push off-diagonal fidelities toward a
+    # small, uniform value once circuit depth outgrows what 28 training
+    # samples can constrain, and no amount of extra ridge regularization
+    # fixes it. Plain angle encoding measured Q^2=0.52 on the same data,
+    # so it is the default here. alpha_grid is kept wider than the class's
+    # own default as a safety margin.
     "QK-KRR_angle": lambda executor: QuantumKernelRidgeRegression(
         executor=executor, feature_map_name="angle", alpha=1.0, alpha_grid=(0.1, 1.0, 10.0, 100.0),
     ),
-    # n_layers=1 is the optimal depth for this dataset's regime, not just a
-    # cautious default: `regression_ansatz` has n_layers * n_qubits * 3 +
-    # n_output_qubits parameters, so on a 4-qubit MANUAL_FEATURES set with
-    # n_output_qubits=3, n_layers=1/2/3 give 15/27/39 trainable parameters
-    # against only 28 LOOCV training samples per fold -- n_layers=2 is
-    # already borderline (27 params ~ 28 samples) and n_layers=3 clearly
-    # over-parameterized. Confirmed empirically at n_layers=1: a full real
-    # 29-fold LOOCV run (log-target, aer_simulator, this exact maxiter
-    # config) measured q2_loocv=0.60, r2_train=0.86 -- a healthy
-    # generalization gap, not the collapse an over-parameterized fit would
-    # show. n_layers=2/3 were not independently re-run under the same full
-    # LOOCV budget (an exhaustive sweep like TrainedQuantumKernelSVM's
-    # n_layers=1-5 classification study would cost several full 29-fold
-    # LOOCV runs here), so this is the parameter-budget argument plus one
-    # confirmed real result, not an exhaustive multi-value comparison.
+    # n_layers=1 is the right depth for this dataset, not just a cautious
+    # default. regression_ansatz has n_layers * n_qubits * 3 +
+    # n_output_qubits parameters, so on a 4-qubit feature set with
+    # n_output_qubits=3, n_layers 1, 2, and 3 give 15, 27, and 39 trainable
+    # parameters against only 28 LOOCV training samples per fold. A full
+    # LOOCV run at n_layers=1 measured Q^2=0.60 with training R^2=0.86, a
+    # healthy generalization gap rather than the collapse an
+    # over-parameterized fit would show.
     "VQR_spsa_cobyla": lambda executor: VariationalQuantumRegressor(
         executor=executor, n_layers=1, n_output_qubits=3, maxiter_spsa=50, maxiter_cobyla=20
     ),
@@ -1021,37 +963,22 @@ def run_quantum_regression_suite(
     model_names: list[str] | None = None,
     log_target: bool = True,
 ) -> dict:
-    """Run the requested quantum regressors (all of `QUANTUM_REGRESSION_MODEL_BUILDERS`
-    by default) through the shared LOOCV harness, predicting COMDR15
-    directly -- the regression counterpart of `run_quantum_classification_suite`.
+    """Run the requested quantum regressors (all of
+    QUANTUM_REGRESSION_MODEL_BUILDERS by default) through the shared LOOCV
+    harness, predicting COMDR15 directly. This is the regression
+    counterpart of run_quantum_classification_suite, and shares one
+    QuantumExecutor across every model for the same reason: a single
+    backend resolution and transpile pass reused across every fold.
 
-    Every model shares one `QuantumExecutor`, for the same reason as the
-    classification suite (a single backend resolution / transpile pass
-    manager reused across every fold and model).
-
-    Parameters
-    ----------
-    log_target : bool, default=True
-        Fit and score every regressor against log(COMDR15) rather than the
-        raw ratio, matching both the Patzmann et al. benchmark table
-        (whose target row is literally "LogCOMDR15min") and this project's
-        own `run_pls_regression_baseline` (also `log_target=True` by
-        default). COMDR_15min spans a ~24x range and is heavily
-        right-skewed by a handful of extreme high-responder outliers (e.g.
-        Fenofibrate at 26.48), which dominates a raw-scale fit under only
-        28-29 LOOCV training samples -- on the classical PLS baseline this
-        alone moved Q^2 from ~0.45 to ~0.76. `r2`/`q2` are reported on
-        that log scale (directly comparable to Patzmann's 0.82/0.77);
-        `mae`/`rmse` are reported back on the original COMDR_15min scale
-        (via `exp()`) since absolute error in log-ratio units is not
-        physically interpretable.
-
-    Each result's `metrics` dict has `r2` (full-data refit R^2, comparable
-    to the Patzmann R^2=0.82 benchmark), `q2` (LOOCV R^2, comparable to
-    their Q^2=0.77 benchmark -- see `loocv_evaluate_regression`'s
-    docstring for why this is the same formula as `r2_score(y_true,
-    y_pred)` on the LOOCV predictions), `mae`, `rmse`, `target_scale`, and
-    `elapsed_s`.
+    log_target defaults to True, fitting and scoring every regressor
+    against log(COMDR15) rather than the raw ratio, matching the Patzmann
+    et al. benchmark and this project's own PLS baseline. COMDR_15min
+    spans roughly a 24x range and is heavily skewed by a few extreme
+    outliers, which dominates a raw-scale fit under only 28-29 training
+    samples per fold. r2 and q2 are reported on that log scale, directly
+    comparable to Patzmann's 0.82 and 0.77; mae and rmse are converted
+    back to the original COMDR_15min scale since error in log-ratio units
+    is not physically interpretable.
     """
     from src.evaluation import loocv_evaluate_regression
 

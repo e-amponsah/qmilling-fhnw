@@ -69,10 +69,9 @@ class ExecutionConfig:
     seed: int = RANDOM_SEED
     ibm_backend_name: str | None = None  # if not set, picks the least busy backend
     noise_model: NoiseModel | None = None  # override for aer_noisy, otherwise built automatically
-    # Below apply to mode="ibm_runtime" only -- a job on real hardware can
-    # sit queued for minutes to hours, so waiting for it needs its own knobs.
-    job_poll_seconds: float = 15.0  # how often to log queue/running status while waiting
-    job_timeout: float | None = None  # give up after this many seconds; None = wait indefinitely
+    # The next two only matter for mode="ibm_runtime", where a job can queue for a while.
+    job_poll_seconds: float = 15.0  # how often to log queue or running status
+    job_timeout: float | None = None  # give up after this many seconds, None waits indefinitely
 
     def label(self) -> str:
         if self.mode == "ibm_runtime":
@@ -131,20 +130,15 @@ class QuantumExecutor:
         possible, then return a list of measurement count dictionaries in
         the same order as the input circuits.
 
-        Batching all the circuits needed for one LOOCV fold, or one full
-        kernel matrix, into a single job is what makes running on a real
-        or cloud queued backend practical. Submitting one job per circuit
-        would be far too slow. But a real backend caps how many circuits
-        one job can hold (`backend.configuration().max_experiments`) --
-        exceeding it does not raise a clean client-side error, the job can
-        sit in RUNNING for a long time and then get silently CANCELLED
-        server-side with no error message. When `circuits` is larger than
-        that cap (routine for a 29x29 kernel matrix -- 435 circuits -- on a
-        backend capped at 75), this splits it into consecutive sub-batches
-        of at most that size, submits each as its own job in turn, and
-        concatenates their results. AerSimulator has no such practical
-        limit, so this is a no-op (one job, like before) outside
-        mode="ibm_runtime".
+        Batching everything needed for one LOOCV fold, or one full kernel
+        matrix, into a single job is what makes running on a real or cloud
+        queued backend practical. A real backend also caps how many
+        circuits one job can hold, and going over that cap does not raise
+        a clean error. The job just sits in RUNNING and then gets silently
+        cancelled server side. If `circuits` is bigger than that cap, this
+        splits it into consecutive sub-batches, submits each as its own
+        job, and stitches the results back together. AerSimulator has no
+        such limit, so outside `mode="ibm_runtime"` this is just one job.
         """
         if not circuits:
             return []
@@ -154,7 +148,7 @@ class QuantumExecutor:
 
         chunks = [circuits[i:i + max_per_job] for i in range(0, len(circuits), max_per_job)]
         logger.info(
-            "Batch of %d circuits exceeds backend limit (max_experiments=%d) -- "
+            "Batch of %d circuits exceeds backend limit (max_experiments=%d), "
             "splitting into %d sequential job(s).",
             len(circuits), max_per_job, len(chunks),
         )
@@ -165,10 +159,9 @@ class QuantumExecutor:
         return counts_list
 
     def _max_circuits_per_job(self) -> int | None:
-        """The backend's hard cap on circuits (PUBs) per Sampler job, or
-        None if unknown/not applicable (local simulators). Only queried
-        for mode="ibm_runtime" -- AerSimulator effectively has no such
-        limit for the batch sizes this project ever submits.
+        """The backend's hard cap on circuits per Sampler job, or None if
+        unknown or not applicable. Only checked for mode="ibm_runtime";
+        AerSimulator has no such limit for the batch sizes used here.
         """
         if self.config.mode != "ibm_runtime":
             return None
@@ -179,24 +172,19 @@ class QuantumExecutor:
             return None
 
     def _submit_and_wait(self, circuits: list[QuantumCircuit]) -> list[dict[str, int]]:
-        """Transpile, submit, and wait for exactly ONE Sampler job (already
-        assumed to respect the backend's max_experiments cap), returning
-        its decoded counts in submission order.
+        """Transpile, submit, and wait for exactly one Sampler job, already
+        assumed to respect the backend's circuit cap, returning its
+        decoded counts in submission order.
         """
         transpiled = self._pm.run(circuits)
         job = self.sampler.run(transpiled, shots=self.config.shots)
 
         if self.config.mode == "ibm_runtime":
-            # job.result() on qiskit-ibm-runtime already blocks until the
-            # job reaches a final state, but it polls silently and any
-            # transient network error while doing so (a dropped wifi packet
-            # during a multi-hour queue wait) propagates straight up and
-            # kills the whole LOOCV run even though the job itself is still
-            # fine on IBM's servers. _wait_for_ibm_job logs the job ID right
-            # away (so it is recoverable with recover_ibm_job_counts even if
-            # this process dies), reports queue/running progress instead of
-            # hanging silently, and retries through transient polling errors
-            # instead of losing an already-submitted job over a blip.
+            # job.result() already blocks until the job finishes, but a
+            # dropped connection during a multi hour queue wait would kill
+            # the whole run even though the job is still fine on IBM's
+            # side. _wait_for_ibm_job logs the job ID so it can be
+            # recovered, and retries through transient polling errors.
             result = self._wait_for_ibm_job(job)
         else:
             result = job.result()
@@ -218,23 +206,22 @@ class QuantumExecutor:
             if self.config.job_timeout is not None and elapsed > self.config.job_timeout:
                 raise TimeoutError(
                     f"IBM Runtime job {job_id} did not finish within {self.config.job_timeout:.0f}s "
-                    f"(last status={last_status}). It keeps running on IBM's side regardless -- "
-                    f"reconnect later with recover_ibm_job_counts('{job_id}')."
+                    f"(last status={last_status}). It keeps running on IBM's side regardless. "
+                    f"Reconnect later with recover_ibm_job_counts('{job_id}')."
                 )
             try:
                 status = job.status()
                 consecutive_poll_errors = 0
             except Exception as exc:
-                # A failure to *check* status is not a failure of the job
-                # itself -- the job keeps running server-side either way.
-                # Retry a bounded number of times before giving up, rather
-                # than letting one network blip discard a queued/running job.
+                # Failing to check status is not the same as the job failing,
+                # it keeps running server side either way. Retry a bounded
+                # number of times before giving up on a queued or running job.
                 consecutive_poll_errors += 1
                 if consecutive_poll_errors > 10:
                     raise RuntimeError(
                         f"Lost contact with IBM Runtime while polling job {job_id} "
                         f"({consecutive_poll_errors} consecutive errors, last: {exc}). "
-                        f"The job may still complete on IBM's side -- reconnect later with "
+                        f"The job may still complete on IBM's side. Reconnect later with "
                         f"recover_ibm_job_counts('{job_id}')."
                     ) from exc
                 logger.warning(
@@ -275,12 +262,11 @@ def _decode_sampler_result(result) -> list[dict[str, int]]:
 
 def recover_ibm_job_counts(job_id: str) -> list[dict[str, int]]:
     """Reconnect to a previously submitted IBM Runtime job by ID and decode
-    its measurement counts, in the same format QuantumExecutor.run_counts_batch
-    returns. For use after this process was interrupted (killed, disconnected,
-    crashed) while a real-hardware job was still queued or running -- the job
-    keeps going on IBM's side, so its results are not lost, just not waited on
-    by this process anymore. The job ID is logged by _wait_for_ibm_job as soon
-    as a job is submitted, specifically so it can be recovered this way.
+    its measurement counts, in the same format run_counts_batch returns.
+    Use this after the process was interrupted while a real hardware job
+    was still queued or running. The job keeps going on IBM's side either
+    way, so nothing is lost, this just picks the results back up. The job
+    ID is logged as soon as a job is submitted so it can be found again.
     """
     service = QiskitRuntimeService()
     job = service.job(job_id)

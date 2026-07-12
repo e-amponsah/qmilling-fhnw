@@ -147,27 +147,19 @@ def select_k_best_features(
     variance_threshold: float = 1e-6,
     random_state: int = RANDOM_SEED,
 ) -> dict:
-    """Automated feature selection, done separately inside each LOOCV fold.
+    """Automated feature selection, run separately inside each LOOCV fold so
+    the held-out sample never influences which columns get picked.
 
-    For every candidate k in k_range, this runs a full nested LOOCV: for
-    each training fold, a VarianceThreshold filter, an f_classif score, and
-    a PCA fit (see pca_analysis.py) are all computed on that fold's training
-    data only, then used to score a simple classifier on the held-out
-    sample. This keeps both the feature selection and the PCA redundancy
-    check from ever seeing the held-out sample.
+    For every candidate k, a VarianceThreshold filter, an f_classif score,
+    and a PCA fit are all computed on training data only, then used to
+    score a simple classifier on the held-out sample. Selection also
+    prefers one feature per PCA cluster before taking a second from any
+    cluster, since several descriptors (MolWt, Chi0v, Chi1v, the Kappas,
+    BertzCT) mostly measure the same thing: molecule size.
 
-    Feature selection prefers one feature per PCA cluster before picking a
-    second feature from any cluster. For example, MolWt, Chi0v, Chi1v,
-    Kappa1, Kappa2, Kappa3, and BertzCT all measure roughly the same thing
-    (molecule size), so taking four of them barely adds more information
-    than taking one of them and using the other three slots on unrelated
-    descriptors.
-
-    Returns a dict with the best k, the LOOCV score for every k, and the
-    final feature list chosen by running selection once on the full
-    dataset. That final list is for reporting and for models with a fixed
-    input size (like the 6 qubit QCNN). Any actual model evaluation must
-    redo selection per fold using the nested loop above, not this final list.
+    Returns the best k, the score for every k, and a feature list from one
+    final fit on the full dataset (used for reporting and for the QCNN's
+    fixed 6 qubit input, not for scoring any model).
     """
     X_arr = X.values
     y_arr = y.values
@@ -253,20 +245,11 @@ def get_modeling_features(
 ) -> dict:
     """Main feature selection entry point, used by main.py and the notebooks.
 
-    If MANUAL_FEATURES is set in .env, that list is used directly instead
-    of running automated selection. This is useful after looking at
-    plots/feature_correlation_heatmap.png and deciding on your own columns.
-    Otherwise this falls back to select_k_best_features above.
-
-    Either way, the return value has the same shape (source, best_k,
-    scores_by_k, selected_features, features_by_k), so callers do not need
-    to know which path was taken.
-
-    features_by_k[6] is always filled in, because the QCNN model needs
-    exactly 6 qubits. It comes from MANUAL_FEATURES_QCNN (.env) if that is
-    set (independently of MANUAL_FEATURES, which covers every other model),
-    from MANUAL_FEATURES itself when that happens to already be a 6 feature
-    list, or otherwise from an automated 6 feature selection.
+    Uses MANUAL_FEATURES from .env directly if it's set, otherwise falls
+    back to select_k_best_features. Either way the return shape is the
+    same, so callers don't need to know which path was taken.
+    features_by_k[6] is always filled in for the QCNN, which needs exactly
+    6 qubits regardless of what the other models use.
     """
     from src.config import MANUAL_FEATURES, MANUAL_FEATURES_QCNN
 

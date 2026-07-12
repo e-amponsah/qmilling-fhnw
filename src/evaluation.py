@@ -1,11 +1,11 @@
 """The LOOCV evaluation engine, the Kernel Target Alignment metric, and the
 results table builder.
 
-Any scaler or model is fit only on the training fold, and the held out 
-sample only ever gets .transform() or .predict() called on it, never .fit(). 
-loocv_evaluate and loocv_evaluate_regression are the two functions that every 
-model in classical_models.py and quantum_models.py runs through, so this rule holds
-for the whole project, not just some models.
+Any scaler or model is fit only on the training fold, and the held out
+sample only ever gets .transform() or .predict() called on it, never .fit().
+loocv_evaluate and loocv_evaluate_regression are the two functions that every
+model in classical_models.py and quantum_models.py runs through, so this rule
+holds for the whole project, not just some models.
 """
 
 import json
@@ -155,9 +155,9 @@ def summarize_results(results_by_model: dict[str, dict], kind: str = "classifica
     if kind == "classification":
         sort_col = "accuracy"
     else:
-        # "q2_loocv" for loocv_evaluate_regression() output (e.g. PLS),
-        # "q2" for run_quantum_regression_suite() output -- both name the
-        # same LOOCV-R^2 quantity, just under the key each caller settled on.
+        # loocv_evaluate_regression() output (e.g. PLS) uses "q2_loocv",
+        # run_quantum_regression_suite() output uses "q2". Both name the
+        # same LOOCV R^2 quantity under a different key.
         sort_col = "q2_loocv" if "q2_loocv" in df.columns else "q2"
     if sort_col in df.columns:
         df = df.sort_values(sort_col, ascending=False).reset_index(drop=True)
@@ -194,15 +194,15 @@ def _normalize_classification_result(res: dict) -> dict:
 
 def _normalize_regression_result(res: dict) -> dict:
     """Normalizes either of this project's two regression result shapes into
-    the {"metrics", "predictions", "targets", "scores"} schema:
-    - run_quantum_regression_suite() output already has predictions/targets/
-      scores on the raw COMDR15 scale and r2/q2/mae/rmse metrics -- passed
-      through as-is (aside from dropping the extra target_scale/n_folds keys).
-    - loocv_evaluate_regression() output (e.g. the PLS baseline) has
-      y_true/y_pred and q2_loocv/r2_train instead; if fit on log(COMDR15)
-      (metrics["target_scale"] starts with "log"), y_true/y_pred are
-      exponentiated back to the raw scale before mae/rmse are computed, so
-      every regressor's JSON is comparable in the same physical units.
+    the {"metrics", "predictions", "targets", "scores"} schema.
+
+    run_quantum_regression_suite() output already has predictions, targets,
+    and scores on the raw COMDR15 scale plus r2/q2/mae/rmse metrics, so it
+    passes through mostly as-is. loocv_evaluate_regression() output (the
+    PLS baseline) has y_true/y_pred and q2_loocv/r2_train instead. If that
+    result was fit on log(COMDR15), y_true and y_pred are exponentiated
+    back to the raw scale before mae and rmse are computed, so every
+    regressor's JSON ends up comparable in the same physical units.
     """
     m = res["metrics"]
     if "predictions" in res and "targets" in res:
@@ -230,17 +230,11 @@ def _normalize_regression_result(res: dict) -> dict:
 
 
 def save_results_json(results_by_model: dict[str, dict], kind: str, results_dir: str | Path | None = None) -> None:
-    """Write one normalized JSON file per model (`<model_name>.json`), the
-    format scripts/plot_model_comparison.py's `load_results` reads.
-
-    Parameters
-    ----------
-    results_by_model : dict
-        {model_name: loocv_evaluate()/loocv_evaluate_regression()/
-        run_quantum_regression_suite() output}.
-    kind : {"classification", "regression"}
-    results_dir : str or Path, optional
-        Defaults to `RESULTS_DIR` (data/results/).
+    """Write one normalized JSON file per model, named <model_name>.json,
+    in the format scripts/plot_model_comparison.py's load_results reads.
+    results_by_model maps model name to loocv_evaluate(),
+    loocv_evaluate_regression(), or run_quantum_regression_suite() output.
+    results_dir defaults to RESULTS_DIR (data/results/).
     """
     out_dir = Path(results_dir) if results_dir is not None else RESULTS_DIR
     out_dir.mkdir(parents=True, exist_ok=True)

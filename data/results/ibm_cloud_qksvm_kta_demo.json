@@ -1,0 +1,36 @@
+{
+  "backend": "ibm_marrakesh",
+  "shots": 4096,
+  "n_layers": 3,
+  "kta_before": 0.17809050247648525,
+  "kta_after": 0.2589698491523749,
+  "drugs": [
+    "Rivaroxaban",
+    "Aripiprazole",
+    "Gemfibrozil",
+    "Celecoxib",
+    "Cinnarizine"
+  ],
+  "y_true": [
+    0,
+    1,
+    0,
+    0,
+    1
+  ],
+  "y_pred": [
+    0,
+    1,
+    1,
+    0,
+    1
+  ],
+  "p_responder": [
+    0.3052576657708581,
+    0.8292911957689177,
+    0.7332135957705672,
+    0.21270448392474695,
+    0.6544793177039236
+  ],
+  "accuracy": 0.8
+}
